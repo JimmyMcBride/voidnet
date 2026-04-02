@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"voidnet/internal/app"
 	"voidnet/internal/content"
 	"voidnet/internal/meta"
@@ -30,6 +32,12 @@ func newCombatTestModel(t *testing.T, seed int64) model {
 		t.Fatalf("expected combat scene for test setup")
 	}
 	return model
+}
+
+func settleCombatPlayback(m *model) {
+	for m.playback != nil {
+		_ = m.fastForwardPlayback()
+	}
 }
 
 func TestApplyChoiceResetsSelectionToFirstOption(t *testing.T) {
@@ -164,6 +172,84 @@ func TestCombatLogAccumulatesDuringPlayback(t *testing.T) {
 	}
 }
 
+func TestFormatCombatLogLineStylesTurnActionAndRoll(t *testing.T) {
+	turn := formatCombatLogLine("Enemy turn. Acting first.")
+	if !strings.Contains(turn, colorize(ansiBold+ansiYellow, "[TURN]")) {
+		t.Fatalf("expected turn tag styling, got %q", turn)
+	}
+	if !strings.Contains(turn, colorize(ansiBold+ansiRed, "Enemy turn.")) {
+		t.Fatalf("expected enemy turn emphasis, got %q", turn)
+	}
+
+	action := formatCombatLogLine("Enemy NullPointer used Spike + Single.")
+	if !strings.Contains(action, colorize(ansiBold+ansiYellow, "[ACT ]")) {
+		t.Fatalf("expected action tag styling, got %q", action)
+	}
+	if !strings.Contains(action, colorize(ansiBold+ansiRed, "Enemy NullPointer")) {
+		t.Fatalf("expected actor emphasis in action line, got %q", action)
+	}
+	if !strings.Contains(action, colorize(ansiBold+ansiYellow, "Spike")) {
+		t.Fatalf("expected effect emphasis in action line, got %q", action)
+	}
+
+	roll := formatCombatLogLine("Success chance 66% (base 82, modifier -10, status -10, stability diff -4, target resistance -10). Roll 78.")
+	if !strings.Contains(roll, colorize(ansiDim+ansiYellow, "[ROLL]")) {
+		t.Fatalf("expected roll tag styling, got %q", roll)
+	}
+	if !strings.Contains(roll, colorize(ansiBold+ansiYellow, "66%")) || !strings.Contains(roll, colorize(ansiBold+ansiYellow, "78")) {
+		t.Fatalf("expected chance and roll emphasis, got %q", roll)
+	}
+	if !strings.Contains(roll, colorize(ansiCyan, "stability diff")) || !strings.Contains(roll, colorize(ansiCyan, "target resistance")) {
+		t.Fatalf("expected stability-related terms to be highlighted, got %q", roll)
+	}
+}
+
+func TestFormatCombatLogLineStylesStatusAndRewards(t *testing.T) {
+	status := formatCombatLogLine("Your Firewall is now Corrupted.")
+	if !strings.Contains(status, colorize(ansiBold+ansiCyan, "Your Firewall")) {
+		t.Fatalf("expected player actor emphasis, got %q", status)
+	}
+	if !strings.Contains(status, colorize(ansiBold+ansiYellow, "Corrupted")) {
+		t.Fatalf("expected negative status emphasis, got %q", status)
+	}
+
+	gain := formatCombatLogLine("Firewall gained +5 Integrity, +0 Speed, +1 Stability.")
+	if !strings.Contains(gain, colorize(ansiBold+ansiGreen, "[GAIN]")) {
+		t.Fatalf("expected gain tag styling, got %q", gain)
+	}
+	if !strings.Contains(gain, colorize(ansiBold+ansiGreen, "+5")) || !strings.Contains(gain, colorize(ansiBold+ansiGreen, "+1")) {
+		t.Fatalf("expected highlighted stat gains, got %q", gain)
+	}
+
+	lore := formatCombatLogLine("[LOG_01] \"we built this system to be free...\"")
+	if !strings.Contains(lore, colorize(ansiDim+ansiCyan, "[LOG ]")) {
+		t.Fatalf("expected lore tag styling, got %q", lore)
+	}
+}
+
+func TestFormatCombatLogLineFallsBackCleanly(t *testing.T) {
+	line := "Unclassified combat note."
+	formatted := formatCombatLogLine(line)
+	if formatted != line {
+		t.Fatalf("expected fallback lines to remain readable, got %q", formatted)
+	}
+}
+
+func TestCombatLogRowsWrapStyledLinesByVisibleWidth(t *testing.T) {
+	model := newCombatTestModel(t, 2)
+	model.combatLogLines = []string{"Success chance 66% (base 82, modifier -10, status -10, stability diff -4, target resistance -10). Roll 78."}
+
+	rows := model.combatLogRows(20)
+	if len(rows) < 2 {
+		t.Fatalf("expected styled log line to wrap in narrow viewport, got %+v", rows)
+	}
+	for _, row := range rows {
+		if visibleWidth(row) > 20 {
+			t.Fatalf("expected wrapped row width <= 20, got %d for %q", visibleWidth(row), row)
+		}
+	}
+}
+
 func TestCombatLogScrollControlsAndAutoFollow(t *testing.T) {
 	model := newCombatTestModel(t, 2)
 	model.combatLogLines = nil
@@ -236,6 +322,58 @@ func TestCombatLogPreservedAcrossInspectBack(t *testing.T) {
 	}
 	if got := strings.Join(model.combatLogLines, "\n"); got != strings.Join(before, "\n") {
 		t.Fatalf("expected inspect back to preserve combat log, got %+v want %+v", model.combatLogLines, before)
+	}
+}
+
+func TestCombatMenuShowsSelectedChoicePreview(t *testing.T) {
+	model := newCombatTestModel(t, 2)
+	settleCombatPlayback(&model)
+
+	lines := model.renderCombatMenuLines()
+	rendered := strings.Join(lines, "\n")
+	if !strings.Contains(rendered, "Preview:") {
+		t.Fatalf("expected combat menu preview block, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Damage | 90% base accuracy | 9 base power") {
+		t.Fatalf("expected selected ability preview text, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Press i for full command detail.") {
+		t.Fatalf("expected modal hint in combat menu, got:\n%s", rendered)
+	}
+}
+
+func TestCombatChoiceModalOpensAndCloses(t *testing.T) {
+	m := newCombatTestModel(t, 2)
+	settleCombatPlayback(&m)
+
+	m.openChoiceModal()
+	if m.activeModal == nil {
+		t.Fatalf("expected choice modal to open for selected combat ability")
+	}
+	if m.activeModal.Title != "Spike + Single" {
+		t.Fatalf("unexpected modal title %q", m.activeModal.Title)
+	}
+
+	rendered := m.render()
+	if !strings.Contains(rendered, "Close with i, Esc, or q.") {
+		t.Fatalf("expected modal overlay close hint, got:\n%s", rendered)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "i"})
+	next := updated.(model)
+	if next.activeModal != nil {
+		t.Fatalf("expected modal to close on i")
+	}
+}
+
+func TestCombatChoiceModalStaysLockedDuringPlayback(t *testing.T) {
+	model := newCombatTestModel(t, 2)
+	model.playback = &playbackSequence{}
+
+	model.openChoiceModal()
+
+	if model.activeModal != nil {
+		t.Fatalf("expected modal open to be blocked during playback")
 	}
 }
 

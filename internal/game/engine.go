@@ -45,6 +45,12 @@ type Stats struct {
 	Stability int
 }
 
+type chanceTerm struct {
+	Label  string
+	Value  int
+	Always bool
+}
+
 type Ability struct {
 	EffectID   string
 	ModifierID string
@@ -265,13 +271,13 @@ func (e *Engine) AttemptCapture() ([]string, error) {
 		return nil, fmt.Errorf("capture is not allowed in this encounter")
 	}
 
-	chance, eligible := e.captureChance()
+	chance, eligible, terms := e.captureChanceDetails()
 	lines := []string{}
 	if !eligible {
 		lines = append(lines, "Isolation failed. Target Integrity is above 50%.")
 	} else {
 		roll := e.rng.Intn(100) + 1
-		lines = append(lines, fmt.Sprintf("Isolation chance %d%%. Roll %d.", chance, roll))
+		lines = append(lines, formatChanceBreakdown("Isolation chance", chance, roll, terms))
 		if roll <= chance {
 			lines = append(lines, "Isolation successful.")
 			captured := e.Run.Combat.Enemy
@@ -362,35 +368,53 @@ func (e *Engine) NodeChoices() []string {
 }
 
 func (e *Engine) captureChance() (int, bool) {
+	chance, eligible, _ := e.captureChanceDetails()
+	return chance, eligible
+}
+
+func (e *Engine) captureChanceDetails() (int, bool, []chanceTerm) {
 	enemy := &e.Run.Combat.Enemy
 	if enemy.MaxIntegrity == 0 {
-		return 0, false
+		return 0, false, nil
 	}
 
 	ratio := float64(enemy.Integrity) / float64(enemy.MaxIntegrity)
 	if ratio > 0.50 {
-		return 0, false
+		return 0, false, nil
 	}
 
-	chance := 50
+	base := 50
 	if ratio <= 0.25 {
-		chance = 80
+		base = 80
 	}
+	chance := base
+	terms := []chanceTerm{{Label: "base", Value: base, Always: true}}
 
+	corruptedBonus := 0
+	negativeStatusBonus := 0
 	for statusID := range enemy.Statuses {
 		if statusID == "corrupted" {
-			chance += 10
+			corruptedBonus += 10
 			continue
 		}
 		def := e.Content.Statuses[statusID]
 		if !def.IsPositive {
-			chance += 5
+			negativeStatusBonus += 5
 		}
+	}
+	chance += corruptedBonus
+	chance += negativeStatusBonus
+	if corruptedBonus != 0 {
+		terms = append(terms, chanceTerm{Label: "corrupted", Value: corruptedBonus})
+	}
+	if negativeStatusBonus != 0 {
+		terms = append(terms, chanceTerm{Label: "negative statuses", Value: negativeStatusBonus})
 	}
 
 	resistance := max(0, enemy.Stability/5-1)
 	chance -= resistance
-	return clamp(chance, 5, 95), true
+	terms = append(terms, chanceTerm{Label: "target Stability", Value: -resistance, Always: true})
+	return clamp(chance, 5, 95), true, terms
 }
 
 func (e *Engine) IsPlayerTurn() bool {
@@ -635,13 +659,26 @@ func (e *Engine) resolveAbility(actor Actor, ability Ability) []string {
 	}
 
 	chance := effect.Accuracy
+	terms := []chanceTerm{{Label: "base", Value: effect.Accuracy, Always: true}}
 	if !targetIsSelf {
-		chance += modifier.AccuracyDelta
-		chance += e.traitAccuracyBonus(source)
-		chance += e.statusAccuracyBonus(source)
-		chance += (e.effectiveStability(source) - e.effectiveStability(target)) / 2
-		chance -= e.incomingResistance(target)
+		modifierDelta := modifier.AccuracyDelta
+		traitDelta := e.traitAccuracyBonus(source)
+		statusDelta := e.statusAccuracyBonus(source)
+		stabilityDiff := (e.effectiveStability(source) - e.effectiveStability(target)) / 2
+		targetResistance := -e.incomingResistance(target)
+
+		chance += modifierDelta
+		chance += traitDelta
+		chance += statusDelta
+		chance += stabilityDiff
+		chance += targetResistance
 		chance = clamp(chance, 5, 95)
+
+		terms = appendChanceTerm(terms, "modifier", modifierDelta)
+		terms = appendChanceTerm(terms, "trait", traitDelta)
+		terms = appendChanceTerm(terms, "status", statusDelta)
+		terms = appendChanceTerm(terms, "stability diff", stabilityDiff)
+		terms = appendChanceTerm(terms, "target resistance", targetResistance)
 	}
 
 	power := int(math.Round(float64(effect.Power) * modifier.PowerMultiplier))
@@ -654,7 +691,7 @@ func (e *Engine) resolveAbility(actor Actor, ability Ability) []string {
 	if !targetIsSelf && chance < 100 {
 		roll := e.rng.Intn(100) + 1
 		hit = roll <= chance
-		lines = append(lines, fmt.Sprintf("Success chance %d%%. Roll %d.", chance, roll))
+		lines = append(lines, formatChanceBreakdown("Success chance", chance, roll, terms))
 	}
 
 	if hit {
@@ -962,6 +999,28 @@ func (e *Engine) statusAccuracyBonus(d *Daemon) int {
 		total += e.Content.Statuses[statusID].AccuracyDelta
 	}
 	return total
+}
+
+func appendChanceTerm(terms []chanceTerm, label string, value int) []chanceTerm {
+	if value == 0 {
+		return terms
+	}
+	return append(terms, chanceTerm{Label: label, Value: value})
+}
+
+func formatChanceBreakdown(prefix string, finalChance int, roll int, terms []chanceTerm) string {
+	parts := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if term.Value == 0 && !term.Always {
+			continue
+		}
+		if term.Label == "base" {
+			parts = append(parts, fmt.Sprintf("%s %d", term.Label, term.Value))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %+d", term.Label, term.Value))
+	}
+	return fmt.Sprintf("%s %d%% (%s). Roll %d.", prefix, finalChance, strings.Join(parts, ", "), roll)
 }
 
 func (e *Engine) applyStatus(target *Daemon, statusID string, duration int) {

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,7 @@ type model struct {
 	combatLogScroll     int
 	combatLogAutoFollow bool
 	combatLogGPrefix    bool
+	activeModal         *app.ChoiceDetails
 }
 
 type playbackSequence struct {
@@ -136,6 +138,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case tea.KeyPressMsg:
+		if m.activeModal != nil {
+			switch msg.String() {
+			case "i", "esc", "q":
+				m.activeModal = nil
+			case "ctrl+c":
+				_, _, _ = m.session.Apply("quit")
+				return m, func() tea.Msg { return tea.Quit() }
+			}
+			break
+		}
 		if m.scene.Combat != nil && m.handleCombatLogKey(msg.String()) {
 			break
 		}
@@ -156,6 +168,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedIndex = previousChoice(m.scene, m.selectedIndex)
 		case "down", "j":
 			m.selectedIndex = nextChoice(m.scene, m.selectedIndex)
+		case "i":
+			m.openChoiceModal()
 		case "enter", " ":
 			choice, ok := selectedChoice(m.scene, m.selectedIndex)
 			if ok {
@@ -210,6 +224,7 @@ func (m *model) applyChoice(choiceID string) []tea.Cmd {
 func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events []app.Event, choiceID string) []tea.Cmd {
 	lines := eventMessages(events)
 	cmds := []tea.Cmd{}
+	m.activeModal = nil
 
 	switch {
 	case isCombatEntry(previous, next):
@@ -413,14 +428,18 @@ func (m model) render() string {
 	if m.scene.Combat != nil {
 		separator = "\n"
 	}
-	return strings.Join(sections, separator)
+	rendered := strings.Join(sections, separator)
+	if m.activeModal != nil {
+		return m.renderModalOverlay(rendered)
+	}
+	return rendered
 }
 
 func (m model) renderCombatLayout(width int) string {
 	metrics := m.combatLayoutMetrics(width)
 	encounterPanel := panelFixed("ENGAGED ENCOUNTER", m.renderCombatEncounterLines(width, metrics.wide), width, metrics.encounterBody)
 	logPanel := m.renderCombatLog(width, metrics.logBody)
-	menuPanel := renderMenu(enabledChoices(m.scene), m.selectedIndex, width, m.playback != nil)
+	menuPanel := panel("COMMAND DECK", m.renderCombatMenuLines(), width)
 	return strings.Join([]string{encounterPanel, logPanel, menuPanel}, "\n")
 }
 
@@ -506,6 +525,26 @@ type combatLayoutMetrics struct {
 	wide          bool
 }
 
+type combatLogClass string
+
+const (
+	combatLogPrelude  combatLogClass = "NODE"
+	combatLogTurn     combatLogClass = "TURN"
+	combatLogAction   combatLogClass = "ACT"
+	combatLogRoll     combatLogClass = "ROLL"
+	combatLogCapture  combatLogClass = "CAPT"
+	combatLogHit      combatLogClass = "HIT"
+	combatLogHeal     combatLogClass = "HEAL"
+	combatLogStatus   combatLogClass = "STAT"
+	combatLogMiss     combatLogClass = "MISS"
+	combatLogDot      combatLogClass = "DOT"
+	combatLogBackfire combatLogClass = "RISK"
+	combatLogCrash    combatLogClass = "FAIL"
+	combatLogGain     combatLogClass = "GAIN"
+	combatLogLore     combatLogClass = "LOG"
+	combatLogFallback combatLogClass = ""
+)
+
 func (m model) combatLayoutMetrics(width int) combatLayoutMetrics {
 	wide := width >= 78
 	encounterBody := wrappedLineCount(m.renderCombatEncounterLines(width, wide), width)
@@ -513,7 +552,7 @@ func (m model) combatLayoutMetrics(width int) combatLayoutMetrics {
 		encounterBody = 1
 	}
 
-	menuBody := wrappedLineCount(renderMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil), width)
+	menuBody := wrappedLineCount(m.renderCombatMenuLines(), width)
 	if menuBody < 1 {
 		menuBody = 1
 	}
@@ -696,7 +735,11 @@ func (m model) combatLogRows(width int) []string {
 	if len(m.combatLogLines) == 0 {
 		return []string{colorize(ansiDim, "Awaiting combat telemetry...")}
 	}
-	return wrapLines(m.combatLogLines, width)
+	styled := make([]string, 0, len(m.combatLogLines))
+	for _, line := range m.combatLogLines {
+		styled = append(styled, formatCombatLogLine(line))
+	}
+	return wrapLines(styled, width)
 }
 
 func (m model) combatLogStart(width int, contentHeight int) int {
@@ -720,6 +763,413 @@ func (m model) combatLogStatus(start int, end int, total int) string {
 		end = start
 	}
 	return fmt.Sprintf("%s | lines %d-%d of %d", mode, start+1, max(start+1, end), total)
+}
+
+func formatCombatLogLine(line string) string {
+	class := classifyCombatLogLine(line)
+	tag := combatLogTag(class)
+	body := styleCombatLogBody(class, line)
+	if tag == "" {
+		return body
+	}
+	return tag + " " + body
+}
+
+func classifyCombatLogLine(line string) combatLogClass {
+	switch {
+	case strings.HasPrefix(line, "Entered "), strings.HasPrefix(line, "Encountered "):
+		return combatLogPrelude
+	case line == "Your turn.", strings.HasPrefix(line, "Enemy turn."):
+		return combatLogTurn
+	case strings.Contains(line, " used "):
+		return combatLogAction
+	case strings.HasPrefix(line, "Success chance "):
+		return combatLogRoll
+	case strings.HasPrefix(line, "Isolation chance "), strings.HasPrefix(line, "Isolation successful."), strings.HasPrefix(line, "Isolation failed."):
+		return combatLogCapture
+	case strings.Contains(line, " restored ") && strings.Contains(line, " Integrity"):
+		return combatLogHeal
+	case strings.Contains(line, " took ") && strings.HasSuffix(line, " damage."):
+		return combatLogHit
+	case strings.Contains(line, " gained +"), strings.Contains(line, " joined the roster."), strings.Contains(line, " is ready to join the roster"), strings.HasPrefix(line, "Unlocked "):
+		return combatLogGain
+	case strings.Contains(line, " is now "), strings.Contains(line, " gained "), strings.Contains(line, " cleared "):
+		return combatLogStatus
+	case line == "The action failed to land.":
+		return combatLogMiss
+	case strings.Contains(line, " suffered ") && strings.Contains(line, " from "):
+		return combatLogDot
+	case strings.Contains(line, " backfired for "):
+		return combatLogBackfire
+	case strings.HasSuffix(line, " crashed."), strings.Contains(line, " triggered "):
+		return combatLogCrash
+	case strings.HasPrefix(line, "[LOG_"):
+		return combatLogLore
+	default:
+		return combatLogFallback
+	}
+}
+
+func combatLogTag(class combatLogClass) string {
+	switch class {
+	case combatLogPrelude:
+		return colorize(ansiDim+ansiCyan, "[NODE]")
+	case combatLogTurn:
+		return colorize(ansiBold+ansiYellow, "[TURN]")
+	case combatLogAction:
+		return colorize(ansiBold+ansiYellow, "[ACT ]")
+	case combatLogRoll:
+		return colorize(ansiDim+ansiYellow, "[ROLL]")
+	case combatLogCapture:
+		return colorize(ansiBold+ansiGreen, "[CAPT]")
+	case combatLogHit:
+		return colorize(ansiBold+ansiRed, "[HIT ]")
+	case combatLogHeal:
+		return colorize(ansiBold+ansiGreen, "[HEAL]")
+	case combatLogStatus:
+		return colorize(ansiBold+ansiCyan, "[STAT]")
+	case combatLogMiss:
+		return colorize(ansiBold+ansiYellow, "[MISS]")
+	case combatLogDot:
+		return colorize(ansiYellow, "[DOT ]")
+	case combatLogBackfire:
+		return colorize(ansiYellow, "[RISK]")
+	case combatLogCrash:
+		return colorize(ansiBold+ansiRed, "[FAIL]")
+	case combatLogGain:
+		return colorize(ansiBold+ansiGreen, "[GAIN]")
+	case combatLogLore:
+		return colorize(ansiDim+ansiCyan, "[LOG ]")
+	default:
+		return ""
+	}
+}
+
+func styleCombatLogBody(class combatLogClass, line string) string {
+	switch class {
+	case combatLogPrelude:
+		return styleCombatPreludeLine(line)
+	case combatLogTurn:
+		return styleCombatTurnLine(line)
+	case combatLogAction:
+		return styleCombatActionLine(line)
+	case combatLogRoll:
+		return styleCombatRollLine(line)
+	case combatLogCapture:
+		return styleCombatCaptureLine(line)
+	case combatLogHit:
+		return styleCombatImpactLine(line, ansiYellow)
+	case combatLogHeal:
+		return styleCombatImpactLine(line, ansiGreen)
+	case combatLogStatus:
+		return styleCombatStatusLine(line)
+	case combatLogMiss:
+		return colorize(ansiBold+ansiYellow, line)
+	case combatLogDot:
+		return styleCombatDotLine(line)
+	case combatLogBackfire:
+		return styleCombatBackfireLine(line)
+	case combatLogCrash:
+		return styleCombatCrashLine(line)
+	case combatLogGain:
+		return styleCombatGainLine(line)
+	case combatLogLore:
+		return colorize(ansiDim+ansiCyan, line)
+	default:
+		return emphasizeCombatActors(line)
+	}
+}
+
+func styleCombatPreludeLine(line string) string {
+	switch {
+	case strings.HasPrefix(line, "Entered "):
+		return colorize(ansiDim, "Entered ") + colorize(ansiCyan, strings.TrimSuffix(strings.TrimPrefix(line, "Entered "), "."))
+	case strings.HasPrefix(line, "Encountered "):
+		return colorize(ansiDim, "Encountered ") + colorize(ansiRed, strings.TrimSuffix(strings.TrimPrefix(line, "Encountered "), "."))
+	default:
+		return colorize(ansiDim, line)
+	}
+}
+
+func styleCombatTurnLine(line string) string {
+	switch {
+	case line == "Your turn.":
+		return colorize(ansiBold+ansiCyan, "Your turn.")
+	case strings.HasPrefix(line, "Enemy turn."):
+		return colorize(ansiBold+ansiRed, "Enemy turn.") + colorize(ansiDim, strings.TrimPrefix(line, "Enemy turn."))
+	default:
+		return colorize(ansiBold+ansiYellow, line)
+	}
+}
+
+func styleCombatActionLine(line string) string {
+	left, right, ok := strings.Cut(line, " used ")
+	if !ok {
+		return emphasizeCombatActors(line)
+	}
+	effect, modifierPart, ok := strings.Cut(right, " + ")
+	if !ok {
+		return styleActorLabel(left) + colorize(ansiDim, " used ") + colorize(ansiBold+ansiYellow, strings.TrimSuffix(right, "."))
+	}
+	modifier := strings.TrimSuffix(modifierPart, ".")
+	return styleActorLabel(left) +
+		colorize(ansiDim, " used ") +
+		colorize(ansiBold+ansiYellow, effect) +
+		colorize(ansiDim, " + ") +
+		colorize(ansiYellow, modifier) +
+		colorize(ansiDim, ".")
+}
+
+func styleCombatRollLine(line string) string {
+	prefixPart, breakdownPart, ok := strings.Cut(line, " (")
+	if ok {
+		breakdown, rollPart, ok := strings.Cut(breakdownPart, "). Roll ")
+		if ok {
+			prefixFields := strings.Fields(prefixPart)
+			if len(prefixFields) >= 3 {
+				label := strings.Join(prefixFields[:2], " ")
+				chance := prefixFields[2]
+				roll := strings.TrimSuffix(rollPart, ".")
+				return colorize(ansiDim, label+" ") +
+					colorize(ansiBold+ansiYellow, chance) +
+					colorize(ansiDim, " (") +
+					styleChanceBreakdown(breakdown) +
+					colorize(ansiDim, "). Roll ") +
+					colorize(ansiBold+ansiYellow, roll) +
+					colorize(ansiDim, ".")
+			}
+		}
+	}
+
+	parts := strings.Fields(line)
+	if len(parts) < 5 {
+		return line
+	}
+	chance := strings.TrimSuffix(parts[2], ".")
+	roll := strings.TrimSuffix(parts[4], ".")
+	return colorize(ansiDim, strings.Join(parts[:2], " ")+" ") +
+		colorize(ansiBold+ansiYellow, chance) +
+		colorize(ansiDim, ".") +
+		colorize(ansiDim, " "+parts[3]+" ") +
+		colorize(ansiBold+ansiYellow, roll) +
+		colorize(ansiDim, ".")
+}
+
+func styleChanceBreakdown(breakdown string) string {
+	parts := strings.Split(breakdown, ", ")
+	styled := make([]string, 0, len(parts))
+	for _, part := range parts {
+		styled = append(styled, styleChanceBreakdownTerm(part))
+	}
+	return strings.Join(styled, colorize(ansiDim, ", "))
+}
+
+func styleChanceBreakdownTerm(term string) string {
+	label, value, ok := splitChanceTerm(term)
+	if !ok {
+		return colorize(ansiDim, term)
+	}
+	return styleChanceBreakdownLabel(label) +
+		colorize(ansiDim, " ") +
+		colorize(ansiBold+ansiYellow, value)
+}
+
+func splitChanceTerm(term string) (string, string, bool) {
+	index := strings.LastIndex(term, " ")
+	if index <= 0 || index >= len(term)-1 {
+		return "", "", false
+	}
+	label := term[:index]
+	value := term[index+1:]
+	if len(value) == 0 {
+		return "", "", false
+	}
+	switch value[0] {
+	case '+', '-':
+		if len(value) == 1 {
+			return "", "", false
+		}
+	default:
+		if value[0] < '0' || value[0] > '9' {
+			return "", "", false
+		}
+	}
+	return label, value, true
+}
+
+func styleChanceBreakdownLabel(label string) string {
+	switch label {
+	case "target Stability", "stability diff", "target resistance":
+		return colorize(ansiCyan, label)
+	default:
+		return colorize(ansiDim, label)
+	}
+}
+
+func styleCombatCaptureLine(line string) string {
+	switch {
+	case strings.HasPrefix(line, "Isolation chance "):
+		return styleCombatRollLine(line)
+	case strings.HasPrefix(line, "Isolation successful."):
+		return colorize(ansiBold+ansiGreen, line)
+	case strings.Contains(line, "above 50%"):
+		return colorize(ansiYellow, "Isolation failed.") + colorize(ansiDim, " Target Integrity is above ") + colorize(ansiBold+ansiYellow, "50%") + colorize(ansiDim, ".")
+	case strings.Contains(line, "resisted the breach"):
+		return colorize(ansiYellow, "Isolation failed.") + colorize(ansiDim, " The daemon resisted the breach.")
+	default:
+		return line
+	}
+}
+
+func styleCombatImpactLine(line string, amountColor string) string {
+	var separator string
+	switch {
+	case strings.Contains(line, " took "):
+		separator = " took "
+	case strings.Contains(line, " restored "):
+		separator = " restored "
+	default:
+		return emphasizeCombatActors(line)
+	}
+	left, right, ok := strings.Cut(line, separator)
+	if !ok {
+		return emphasizeCombatActors(line)
+	}
+	parts := strings.Fields(right)
+	if len(parts) == 0 {
+		return emphasizeCombatActors(line)
+	}
+	amount := parts[0]
+	remainder := strings.TrimPrefix(right, amount)
+	return styleActorLabel(left) +
+		colorize(ansiDim, separator) +
+		colorize(ansiBold+amountColor, amount) +
+		colorize(ansiDim, remainder)
+}
+
+func styleCombatStatusLine(line string) string {
+	switch {
+	case strings.Contains(line, " is now "):
+		left, status, _ := strings.Cut(line, " is now ")
+		return styleActorLabel(left) + colorize(ansiDim, " is now ") + styleStatusName(strings.TrimSuffix(status, ".")) + colorize(ansiDim, ".")
+	case strings.Contains(line, " gained "):
+		left, status, _ := strings.Cut(line, " gained ")
+		return styleActorLabel(left) + colorize(ansiDim, " gained ") + styleStatusName(strings.TrimSuffix(status, ".")) + colorize(ansiDim, ".")
+	case strings.Contains(line, " cleared "):
+		left, status, _ := strings.Cut(line, " cleared ")
+		return styleActorLabel(left) + colorize(ansiDim, " cleared ") + colorize(ansiBold+ansiGreen, strings.TrimSuffix(status, ".")) + colorize(ansiDim, ".")
+	default:
+		return emphasizeCombatActors(line)
+	}
+}
+
+func styleCombatDotLine(line string) string {
+	left, right, ok := strings.Cut(line, " suffered ")
+	if !ok {
+		return emphasizeCombatActors(line)
+	}
+	damage, sourcePart, ok := strings.Cut(right, " damage from ")
+	if !ok {
+		return emphasizeCombatActors(line)
+	}
+	return styleActorLabel(left) +
+		colorize(ansiDim, " suffered ") +
+		colorize(ansiBold+ansiYellow, damage) +
+		colorize(ansiDim, " damage from ") +
+		colorize(ansiYellow, strings.TrimSuffix(sourcePart, ".")) +
+		colorize(ansiDim, ".")
+}
+
+func styleCombatBackfireLine(line string) string {
+	left, right, ok := strings.Cut(line, " backfired for ")
+	if !ok {
+		return line
+	}
+	damage := strings.TrimSuffix(strings.TrimSuffix(right, " damage."), " damage")
+	return colorize(ansiYellow, left) +
+		colorize(ansiDim, " backfired for ") +
+		colorize(ansiBold+ansiRed, damage) +
+		colorize(ansiDim, " damage.")
+}
+
+func styleCombatCrashLine(line string) string {
+	switch {
+	case strings.HasSuffix(line, " crashed."):
+		return colorize(ansiBold+ansiRed, strings.TrimSuffix(line, " crashed.")) + colorize(ansiDim, " crashed.")
+	case strings.Contains(line, " triggered "):
+		left, right, _ := strings.Cut(line, " triggered ")
+		trait, damagePart, _ := strings.Cut(right, " for ")
+		damage := strings.TrimSuffix(strings.TrimSuffix(damagePart, " damage."), " damage")
+		return styleActorLabel(left) +
+			colorize(ansiDim, " triggered ") +
+			colorize(ansiYellow, trait) +
+			colorize(ansiDim, " for ") +
+			colorize(ansiBold+ansiRed, damage) +
+			colorize(ansiDim, " damage.")
+	default:
+		return line
+	}
+}
+
+func styleCombatGainLine(line string) string {
+	switch {
+	case strings.Contains(line, " gained +"):
+		left, right, _ := strings.Cut(line, " gained ")
+		return colorize(ansiGreen, left) + colorize(ansiDim, " gained ") + highlightSignedNumbers(right, ansiBold+ansiGreen)
+	case strings.Contains(line, " joined the roster."):
+		name := strings.TrimSuffix(line, " joined the roster.")
+		return colorize(ansiBold+ansiGreen, name) + colorize(ansiDim, " joined the roster.")
+	case strings.Contains(line, " is ready to join the roster"):
+		name, rest, _ := strings.Cut(line, " is ready to join the roster")
+		return colorize(ansiGreen, name) + colorize(ansiDim, " is ready to join the roster") + colorize(ansiDim, rest)
+	case strings.HasPrefix(line, "Unlocked "):
+		prefix, value, _ := strings.Cut(line, ": ")
+		return colorize(ansiGreen, prefix+":") + colorize(ansiBold+ansiGreen, " "+strings.TrimSuffix(value, ".")) + colorize(ansiDim, ".")
+	default:
+		return colorize(ansiGreen, line)
+	}
+}
+
+func emphasizeCombatActors(line string) string {
+	line = strings.ReplaceAll(line, "Enemy ", colorize(ansiRed, "Enemy "))
+	line = strings.ReplaceAll(line, "Your ", colorize(ansiCyan, "Your "))
+	return line
+}
+
+func styleActorLabel(label string) string {
+	switch {
+	case strings.HasPrefix(label, "Enemy "):
+		return colorize(ansiBold+ansiRed, label)
+	case strings.HasPrefix(label, "Your "):
+		return colorize(ansiBold+ansiCyan, label)
+	default:
+		return colorize(ansiBold, label)
+	}
+}
+
+func styleStatusName(name string) string {
+	switch name {
+	case "Stabilized":
+		return colorize(ansiBold+ansiGreen, name)
+	case "Corrupted", "Leaking", "Delayed":
+		return colorize(ansiBold+ansiYellow, name)
+	default:
+		return colorize(ansiBold+ansiCyan, name)
+	}
+}
+
+func highlightSignedNumbers(text string, code string) string {
+	parts := strings.Fields(text)
+	for i, part := range parts {
+		trimmed := strings.Trim(part, ",.")
+		if strings.HasPrefix(trimmed, "+") || strings.HasPrefix(trimmed, "-") {
+			if _, err := strconv.Atoi(trimmed); err == nil {
+				suffix := strings.TrimPrefix(part, trimmed)
+				parts[i] = colorize(code, trimmed) + colorize(ansiDim, suffix)
+			}
+		}
+	}
+	return colorize(ansiDim, strings.Join(parts, " "))
 }
 
 func (m model) renderNodeSelect(width int) string {
@@ -788,17 +1238,38 @@ func stylizeLine(line string) string {
 }
 
 func (m model) controlsHint() string {
+	if m.activeModal != nil {
+		return fmt.Sprintf("controls: i/esc/q close detail | scene=%s", m.scene.Kind)
+	}
 	if m.playback != nil {
 		return fmt.Sprintf("controls: gg/G/ctrl+u/ctrl+d log | enter/space fast-forward | q quit | scene=%s", m.scene.Kind)
 	}
 	if m.scene.Combat != nil {
-		return fmt.Sprintf("controls: j/k menu | gg/G/ctrl+u/ctrl+d log | enter/space select | q quit | scene=%s", m.scene.Kind)
+		return fmt.Sprintf("controls: j/k menu | i detail | gg/G/ctrl+u/ctrl+d log | enter/space select | q quit | scene=%s", m.scene.Kind)
 	}
 	return fmt.Sprintf("controls: up/down or j/k | enter/space select | q quit | scene=%s", m.scene.Kind)
 }
 
 func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool) string {
 	return panel("COMMAND DECK", renderMenuLines(choices, selectedIndex, locked), width)
+}
+
+func (m model) renderCombatMenuLines() []string {
+	lines := renderMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+	detail := m.selectedChoiceDetails()
+	if detail == nil {
+		return lines
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, colorize(ansiCyan, "Preview:"))
+	lines = append(lines, detail.Preview)
+	if m.playback != nil {
+		lines = append(lines, colorize(ansiDim, "Detail modal unlocks when the sequence ends."))
+	} else {
+		lines = append(lines, colorize(ansiDim, "Press i for full command detail."))
+	}
+	return lines
 }
 
 func renderMenuLines(choices []app.Choice, selectedIndex int, locked bool) []string {
@@ -823,6 +1294,55 @@ func renderMenuLines(choices []app.Choice, selectedIndex int, locked bool) []str
 		lines = append(lines, "", colorize(ansiYellow, "Sequence running. Enter/Space fast-forward."))
 	}
 	return lines
+}
+
+func (m *model) openChoiceModal() {
+	if m.playback != nil {
+		return
+	}
+	detail := m.selectedChoiceDetails()
+	if detail == nil {
+		return
+	}
+	copyDetail := *detail
+	copyDetail.Lines = append([]string(nil), detail.Lines...)
+	m.activeModal = &copyDetail
+}
+
+func (m model) selectedChoiceDetails() *app.ChoiceDetails {
+	choice, ok := selectedChoice(m.scene, m.selectedIndex)
+	if !ok || choice.Details == nil {
+		return nil
+	}
+	return choice.Details
+}
+
+func (m model) renderModalOverlay(base string) string {
+	if m.activeModal == nil {
+		return base
+	}
+
+	screenWidth := max(m.width, m.panelWidth()+4)
+	modalWidth := clamp(m.panelWidth()-10, 38, 68)
+	lines := []string{colorize(ansiBold+ansiGreen, m.activeModal.Preview), ""}
+	lines = append(lines, m.activeModal.Lines...)
+	lines = append(lines, "", colorize(ansiDim, "Close with i, Esc, or q."))
+
+	modal := panel(m.activeModal.Title, lines, modalWidth)
+	baseRows := strings.Split(base, "\n")
+	modalRows := strings.Split(modal, "\n")
+	top := max(0, (len(baseRows)-len(modalRows))/2)
+
+	for i, row := range modalRows {
+		idx := top + i
+		centered := centerLine(row, screenWidth)
+		if idx >= len(baseRows) {
+			baseRows = append(baseRows, centered)
+			continue
+		}
+		baseRows[idx] = centered
+	}
+	return strings.Join(baseRows, "\n")
 }
 
 const (

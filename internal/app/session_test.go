@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"voidnet/internal/content"
+	"voidnet/internal/game"
 	"voidnet/internal/meta"
 )
 
@@ -170,5 +171,68 @@ func TestAdvanceEnemyTurnResolvesOneEnemyAction(t *testing.T) {
 	}
 	if len(events) == 0 || !strings.Contains(events[0].Message, "Enemy") || !strings.Contains(events[0].Message, " used ") {
 		t.Fatalf("expected enemy action log, got %+v", events)
+	}
+}
+
+func TestCombatChoiceDetailsExplainStatusEffects(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	details := abilityDetails(game.Ability{EffectID: "corrupt", ModifierID: "single"}, reg)
+	if details == nil {
+		t.Fatalf("expected details for ability")
+	}
+
+	rendered := strings.Join(details.Lines, "\n")
+	if !strings.Contains(rendered, "applies Corrupted for 3 turns (-10 accuracy)") {
+		t.Fatalf("expected status effect explanation in ability details, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Hit chance is lower against targets with higher Stability.") {
+		t.Fatalf("expected stability explanation in hostile ability details, got:\n%s", rendered)
+	}
+}
+
+func TestIsolateDetailsExplainStability(t *testing.T) {
+	details := isolateDetails()
+	if details == nil {
+		t.Fatalf("expected isolate details")
+	}
+
+	rendered := strings.Join(details.Lines, "\n")
+	if !strings.Contains(rendered, "Higher target Stability lowers the capture chance.") {
+		t.Fatalf("expected isolate details to explain Stability, got:\n%s", rendered)
+	}
+}
+
+func TestInspectSceneIncludesStatGlossary(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	store := meta.NewStore(t.TempDir() + "/meta.json")
+	session := NewSession(reg, store, state, 123, true)
+
+	if _, _, err := session.Apply("starter:firewall"); err != nil {
+		t.Fatalf("starter apply failed: %v", err)
+	}
+	if _, _, err := session.Apply("node:n1"); err != nil {
+		t.Fatalf("node apply failed: %v", err)
+	}
+
+	scene, _, err := session.Apply("inspect")
+	if err != nil {
+		t.Fatalf("inspect apply failed: %v", err)
+	}
+
+	rendered := strings.Join(scene.Lines, "\n")
+	if !strings.Contains(rendered, "Stat key:") {
+		t.Fatalf("expected inspect scene to include stat glossary, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "STB Stability: resists hostile effects and lowers isolation chance against this daemon.") {
+		t.Fatalf("expected inspect scene to explain Stability, got:\n%s", rendered)
 	}
 }

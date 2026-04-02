@@ -16,6 +16,13 @@ type Choice struct {
 	ID      string
 	Label   string
 	Enabled bool
+	Details *ChoiceDetails
+}
+
+type ChoiceDetails struct {
+	Title   string
+	Preview string
+	Lines   []string
 }
 
 type Event struct {
@@ -175,10 +182,10 @@ func (s *Session) Snapshot() Scene {
 			lines = append(lines, combat.LastLog...)
 		}
 		choices := []Choice{
-			{ID: "ability:0", Label: abilityLabel(active.Abilities[0], s.registry), Enabled: true},
-			{ID: "ability:1", Label: abilityLabel(active.Abilities[1], s.registry), Enabled: true},
-			{ID: "isolate", Label: "Isolate", Enabled: true},
-			{ID: "inspect", Label: "Inspect", Enabled: true},
+			{ID: "ability:0", Label: abilityLabel(active.Abilities[0], s.registry), Enabled: true, Details: abilityDetails(active.Abilities[0], s.registry)},
+			{ID: "ability:1", Label: abilityLabel(active.Abilities[1], s.registry), Enabled: true, Details: abilityDetails(active.Abilities[1], s.registry)},
+			{ID: "isolate", Label: "Isolate", Enabled: true, Details: isolateDetails()},
+			{ID: "inspect", Label: "Inspect", Enabled: true, Details: inspectDetails()},
 			{ID: "quit", Label: "Quit", Enabled: true},
 		}
 		return Scene{
@@ -217,6 +224,11 @@ func (s *Session) Snapshot() Scene {
 			"",
 			daemonSummary(combatantName("Enemy", &enemy), &enemy, s.registry),
 			fmt.Sprintf("Abilities: %s, %s", abilityLabel(enemy.Abilities[0], s.registry), abilityLabel(enemy.Abilities[1], s.registry)),
+			"",
+			"Stat key:",
+			"INT Integrity: how much damage a daemon can take before crashing.",
+			"SPD Speed: who acts first each round.",
+			"STB Stability: resists hostile effects and lowers isolation chance against this daemon.",
 		}
 		return Scene{
 			Kind:    string(run.Phase),
@@ -397,6 +409,115 @@ func abilityLabel(ability game.Ability, registry *content.Registry) string {
 	effect := registry.Effects[ability.EffectID]
 	modifier := registry.Modifiers[ability.ModifierID]
 	return fmt.Sprintf("%s + %s", effect.Name, modifier.Name)
+}
+
+func abilityDetails(ability game.Ability, registry *content.Registry) *ChoiceDetails {
+	effect := registry.Effects[ability.EffectID]
+	modifier := registry.Modifiers[ability.ModifierID]
+
+	previewParts := []string{strings.Title(effect.Kind)}
+	if effect.Accuracy > 0 {
+		previewParts = append(previewParts, fmt.Sprintf("%d%% base accuracy", effect.Accuracy))
+	}
+	if effect.Power > 0 {
+		previewParts = append(previewParts, fmt.Sprintf("%d base power", effect.Power))
+	}
+
+	lines := []string{
+		fmt.Sprintf("Effect: %s", effect.Name),
+		fmt.Sprintf("Type: %s", strings.Title(effect.Kind)),
+	}
+	if effect.Accuracy > 0 {
+		lines = append(lines, fmt.Sprintf("Base accuracy: %d%%", effect.Accuracy))
+	}
+	if effect.Power > 0 {
+		lines = append(lines, fmt.Sprintf("Base power: %d", effect.Power))
+	}
+	if effect.Kind != "heal" {
+		lines = append(lines, "Hit chance is lower against targets with higher Stability.")
+	}
+	if effect.Status != "" {
+		status := registry.Statuses[effect.Status]
+		lines = append(lines, fmt.Sprintf("On hit: applies %s for %d turns (%s)", status.Name, effect.StatusDuration, statusEffectSummary(status)))
+	}
+	if effect.CleanseNegative {
+		lines = append(lines, "On use: clears one negative status")
+	}
+	if effect.ApplySelfStatus != "" {
+		status := registry.Statuses[effect.ApplySelfStatus]
+		lines = append(lines, fmt.Sprintf("On use: grants %s for %d turns (%s)", status.Name, effect.ApplySelfDuration, statusEffectSummary(status)))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, fmt.Sprintf("Modifier: %s", modifier.Name))
+	lines = append(lines, fmt.Sprintf("Power multiplier: x%.2f", modifier.PowerMultiplier))
+	if modifier.AccuracyDelta != 0 {
+		lines = append(lines, fmt.Sprintf("Accuracy delta: %+d", modifier.AccuracyDelta))
+	} else {
+		lines = append(lines, "Accuracy delta: +0")
+	}
+	if modifier.SelfBackfireChance > 0 {
+		lines = append(lines, fmt.Sprintf("Backfire: %d%% chance for %d self-damage", modifier.SelfBackfireChance, modifier.SelfBackfireDamage))
+	}
+
+	return &ChoiceDetails{
+		Title:   abilityLabel(ability, registry),
+		Preview: strings.Join(previewParts, " | "),
+		Lines:   lines,
+	}
+}
+
+func isolateDetails() *ChoiceDetails {
+	return &ChoiceDetails{
+		Title:   "Isolate",
+		Preview: "Capture at 50% Integrity or lower. Stronger odds below 25%.",
+		Lines: []string{
+			"Attempt to capture the enemy without defeating it.",
+			"",
+			"Only available on non-boss encounters.",
+			"Eligible at 50% Integrity or lower.",
+			"Base chance: 50% from 25-50% Integrity.",
+			"Base chance: 80% at 25% Integrity or lower.",
+			"Corrupted adds +10%; other negative statuses add +5% each.",
+			"Higher target Stability lowers the capture chance.",
+			"Target Stability reduces chance by max(0, Stability/5 - 1).",
+			"Final chance is clamped between 5% and 95%.",
+		},
+	}
+}
+
+func inspectDetails() *ChoiceDetails {
+	return &ChoiceDetails{
+		Title:   "Inspect",
+		Preview: "Open a detailed readout for both daemons without spending a turn.",
+		Lines: []string{
+			"View both combatants in more detail.",
+			"",
+			"Shows traits, stats, and both ability labels.",
+			"Does not spend a combat turn.",
+			"Use Back to return to combat.",
+		},
+	}
+}
+
+func statusEffectSummary(status content.StatusDef) string {
+	parts := []string{}
+	if status.AccuracyDelta != 0 {
+		parts = append(parts, fmt.Sprintf("%+d accuracy", status.AccuracyDelta))
+	}
+	if status.SpeedDelta != 0 {
+		parts = append(parts, fmt.Sprintf("%+d speed", status.SpeedDelta))
+	}
+	if status.StabilityDelta != 0 {
+		parts = append(parts, fmt.Sprintf("%+d stability", status.StabilityDelta))
+	}
+	if status.DOTDamage > 0 {
+		parts = append(parts, fmt.Sprintf("%d damage at end of turn", status.DOTDamage))
+	}
+	if len(parts) == 0 {
+		return "no direct stat change"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func formatStatuses(statuses map[string]int, registry *content.Registry) string {

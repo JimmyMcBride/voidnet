@@ -2,6 +2,7 @@ package game
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"voidnet/internal/content"
@@ -104,6 +105,85 @@ func TestCaptureChanceUsesRebalancedValues(t *testing.T) {
 	engine.Run.Combat.Enemy.Statuses["corrupted"] = 2
 	if chance, eligible := engine.captureChance(); !eligible || chance != 89 {
 		t.Fatalf("expected corrupted bonus to apply, got eligible=%v chance=%d", eligible, chance)
+	}
+}
+
+func TestCaptureChanceDetailsIncludeStabilityBreakdown(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 55, true)
+	engine.Run.Combat = &CombatState{
+		Enemy: Daemon{
+			MaxIntegrity: 100,
+			Integrity:    25,
+			Stability:    10,
+			Statuses: map[string]int{
+				"corrupted": 2,
+				"delayed":   2,
+			},
+		},
+	}
+
+	chance, eligible, terms := engine.captureChanceDetails()
+	if !eligible || chance != 94 {
+		t.Fatalf("expected deterministic capture chance details, got eligible=%v chance=%d", eligible, chance)
+	}
+
+	line := formatChanceBreakdown("Isolation chance", chance, 54, terms)
+	if !strings.Contains(line, "base 80") || !strings.Contains(line, "corrupted +10") || !strings.Contains(line, "negative statuses +5") || !strings.Contains(line, "target Stability -1") {
+		t.Fatalf("expected capture breakdown terms in line, got %q", line)
+	}
+}
+
+func TestResolveAbilityIncludesAccuracyBreakdownTerms(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 77, true)
+	engine.Run.Roster = []Daemon{{
+		ID:           "player",
+		Name:         "Firewall",
+		ArchetypeID:  "firewall",
+		MaxIntegrity: 50,
+		Integrity:    50,
+		Speed:        8,
+		Stability:    12,
+		TraitID:      "persistent",
+		Abilities:    []Ability{{EffectID: "spike", ModifierID: "intensify"}},
+		Statuses:     map[string]int{"corrupted": 2},
+	}}
+	engine.Run.ActiveIndex = 0
+	engine.Run.Combat = &CombatState{
+		NodeID:   "n1",
+		NodeType: NodeStandard,
+		Enemy: Daemon{
+			ID:           "enemy",
+			Name:         "NullPointer",
+			ArchetypeID:  "nullpointer",
+			MaxIntegrity: 40,
+			Integrity:    40,
+			Speed:        10,
+			Stability:    20,
+			TraitID:      "encrypted",
+			Abilities:    []Ability{{EffectID: "spike", ModifierID: "single"}},
+			Statuses:     map[string]int{},
+		},
+		Queue: []Actor{ActorPlayer, ActorEnemy},
+		Round: 1,
+	}
+
+	lines := engine.resolveAbility(ActorPlayer, Ability{EffectID: "spike", ModifierID: "intensify"})
+	if len(lines) < 2 {
+		t.Fatalf("expected resolveAbility to emit roll output, got %+v", lines)
+	}
+	rollLine := lines[1]
+	if !strings.Contains(rollLine, "base 90") || !strings.Contains(rollLine, "modifier -10") || !strings.Contains(rollLine, "status -10") || !strings.Contains(rollLine, "stability diff -4") || !strings.Contains(rollLine, "target resistance -10") {
+		t.Fatalf("expected roll breakdown terms in line, got %q", rollLine)
 	}
 }
 
