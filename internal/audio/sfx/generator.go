@@ -38,6 +38,9 @@ func GenerateMany(preset Preset, baseSeed int64, count int) ([][]int16, int, err
 }
 
 func Generate(params Params) ([]int16, error) {
+	if params.SampleRate > MaxSampleRate {
+		return nil, fmt.Errorf("sample rate %d exceeds max %d", params.SampleRate, MaxSampleRate)
+	}
 	params = clampParams(params)
 	totalSamples := int(math.Ceil(params.Duration * float64(params.SampleRate)))
 	if totalSamples <= 0 {
@@ -91,11 +94,12 @@ func Generate(params Params) ([]int16, error) {
 
 		lpfCut := clamp(params.LPFCutoff+params.LPFRamp*t, 0.001, 1)
 		lpf += (raw - lpf) * lpfCut
+		prevLPFLast := lpfLast
 		lpfLast += (lpf - lpfLast) * 0.5
 		s := lpfLast
 
 		hpfCut := clamp(params.HPFCutoff+params.HPFRamp*t, 0, 0.995)
-		hpf += s - lpfLast
+		hpf += s - prevLPFLast
 		s -= hpf * hpfCut
 
 		phaserOffset += params.PhaserRamp
@@ -120,7 +124,11 @@ func Generate(params Params) ([]int16, error) {
 func ToFloat32PCM(samples []int16) []float32 {
 	out := make([]float32, len(samples))
 	for i, sample := range samples {
-		out[i] = float32(sample) / 32767
+		if sample == math.MinInt16 {
+			out[i] = -1
+			continue
+		}
+		out[i] = float32(sample) / 32768
 	}
 	return out
 }
@@ -190,7 +198,7 @@ func normalize(samples []float64) {
 
 func clampParams(p Params) Params {
 	if p.SampleRate <= 0 {
-		p.SampleRate = 44100
+		p.SampleRate = DefaultSampleRate
 	}
 	if p.Duration <= 0 {
 		p.Duration = p.AttackTime + p.SustainTime + p.DecayTime

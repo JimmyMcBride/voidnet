@@ -29,6 +29,9 @@ func (w WaveType) String() string {
 type Preset string
 
 const (
+	DefaultSampleRate = 44100
+	MaxSampleRate     = 192000
+
 	PresetCursorMove      Preset = "cursor_move"
 	PresetSelect          Preset = "select"
 	PresetScan            Preset = "scan"

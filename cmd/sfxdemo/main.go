@@ -59,6 +59,12 @@ func presetParamsForDemo(preset sfx.Preset, seed int64, sampleRate int) (sfx.Par
 	if err != nil {
 		return sfx.Params{}, err
 	}
+	if sampleRate < 0 {
+		return sfx.Params{}, fmt.Errorf("sample rate must be >= 0")
+	}
+	if sampleRate > sfx.MaxSampleRate {
+		return sfx.Params{}, fmt.Errorf("sample rate %d exceeds max %d", sampleRate, sfx.MaxSampleRate)
+	}
 	if sampleRate > 0 {
 		params.SampleRate = sampleRate
 	}

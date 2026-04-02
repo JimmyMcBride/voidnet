@@ -1,6 +1,7 @@
 package sfx
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -83,6 +84,74 @@ func TestParamsClamp(t *testing.T) {
 	}
 	if p.BitCrush < 1 {
 		t.Fatalf("bitcrush not clamped: %d", p.BitCrush)
+	}
+}
+
+func TestGenerateRejectsExcessiveSampleRate(t *testing.T) {
+	_, err := Generate(Params{
+		SampleRate:  MaxSampleRate + 1,
+		Duration:    0.1,
+		BaseFreq:    440,
+		DutyCycle:   0.5,
+		SustainTime: 0.05,
+		DecayTime:   0.05,
+		LPFCutoff:   1,
+		Volume:      0.5,
+	})
+	if err == nil {
+		t.Fatalf("expected error for excessive sample rate")
+	}
+}
+
+func TestToFloat32PCMStaysWithinRange(t *testing.T) {
+	out := ToFloat32PCM([]int16{math.MinInt16, 0, math.MaxInt16})
+	if out[0] != -1 {
+		t.Fatalf("expected min int16 to map to -1, got %f", out[0])
+	}
+	if out[1] != 0 {
+		t.Fatalf("expected zero sample to remain zero, got %f", out[1])
+	}
+	if out[2] > 1 {
+		t.Fatalf("expected max int16 to stay within range, got %f", out[2])
+	}
+}
+
+func TestHighPassCutoffAffectsOutput(t *testing.T) {
+	base := Params{
+		WaveType:    WaveSaw,
+		SampleRate:  DefaultSampleRate,
+		Duration:    0.15,
+		BaseFreq:    440,
+		DutyCycle:   0.5,
+		AttackTime:  0.005,
+		SustainTime: 0.08,
+		DecayTime:   0.05,
+		LPFCutoff:   1,
+		Volume:      0.7,
+		Seed:        42,
+	}
+
+	a, err := Generate(base)
+	if err != nil {
+		t.Fatalf("generate baseline: %v", err)
+	}
+	base.HPFCutoff = 0.2
+	b, err := Generate(base)
+	if err != nil {
+		t.Fatalf("generate with hpf: %v", err)
+	}
+	if len(a) != len(b) {
+		t.Fatalf("expected equal output lengths, got %d and %d", len(a), len(b))
+	}
+	same := true
+	for i := range a {
+		if a[i] != b[i] {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Fatalf("expected high-pass cutoff to change generated output")
 	}
 }
 
