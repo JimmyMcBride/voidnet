@@ -1,0 +1,230 @@
+{
+  "archetypes": [
+    {
+      "id": "nullpointer",
+      "name": "NullPointer",
+      "role": "offense",
+      "base": { "integrity": 34, "speed": 13, "stability": 6 },
+      "growth": { "integrity": 4, "speed": 1, "stability": 0 },
+      "effect_pool": ["spike", "corrupt", "delay"],
+      "trait_pool": ["volatile", "overclocked", "glitched"]
+    },
+    {
+      "id": "memoryleaker",
+      "name": "MemoryLeaker",
+      "role": "dot",
+      "base": { "integrity": 40, "speed": 10, "stability": 8 },
+      "growth": { "integrity": 4, "speed": 0, "stability": 1 },
+      "effect_pool": ["leak", "corrupt", "patch"],
+      "trait_pool": ["persistent", "glitched", "encrypted"]
+    },
+    {
+      "id": "firewall",
+      "name": "Firewall",
+      "role": "defense",
+      "base": { "integrity": 48, "speed": 8, "stability": 12 },
+      "growth": { "integrity": 5, "speed": 0, "stability": 1 },
+      "effect_pool": ["patch", "delay", "corrupt", "spike"],
+      "trait_pool": ["encrypted", "persistent", "volatile"]
+    },
+    {
+      "id": "scheduler",
+      "name": "Scheduler",
+      "role": "speed",
+      "base": { "integrity": 38, "speed": 15, "stability": 8 },
+      "growth": { "integrity": 3, "speed": 2, "stability": 1 },
+      "effect_pool": ["delay", "spike", "patch"],
+      "trait_pool": ["overclocked", "persistent", "glitched"]
+    }
+  ],
+  "effects": [
+    {
+      "id": "corrupt",
+      "name": "Corrupt",
+      "kind": "status",
+      "accuracy": 82,
+      "power": 0,
+      "status": "corrupted",
+      "status_duration": 3
+    },
+    {
+      "id": "leak",
+      "name": "Leak",
+      "kind": "hybrid",
+      "accuracy": 86,
+      "power": 6,
+      "status": "leaking",
+      "status_duration": 3
+    },
+    {
+      "id": "spike",
+      "name": "Spike",
+      "kind": "damage",
+      "accuracy": 90,
+      "power": 9
+    },
+    {
+      "id": "patch",
+      "name": "Patch",
+      "kind": "heal",
+      "accuracy": 100,
+      "power": 8,
+      "cleanse_negative": true,
+      "apply_self_status": "stabilized",
+      "apply_self_duration": 1
+    },
+    {
+      "id": "delay",
+      "name": "Delay",
+      "kind": "status",
+      "accuracy": 84,
+      "power": 0,
+      "status": "delayed",
+      "status_duration": 2
+    }
+  ],
+  "modifiers": [
+    {
+      "id": "single",
+      "name": "Single",
+      "accuracy_delta": 0,
+      "power_multiplier": 1.0,
+      "self_backfire_chance": 0,
+      "self_backfire_damage": 0
+    },
+    {
+      "id": "intensify",
+      "name": "Intensify",
+      "accuracy_delta": -10,
+      "power_multiplier": 1.35,
+      "self_backfire_chance": 0,
+      "self_backfire_damage": 0
+    },
+    {
+      "id": "unstable",
+      "name": "Unstable",
+      "accuracy_delta": -15,
+      "power_multiplier": 1.50,
+      "self_backfire_chance": 25,
+      "self_backfire_damage": 5
+    }
+  ],
+  "traits": [
+    {
+      "id": "volatile",
+      "name": "Volatile",
+      "description": "Deals damage on death.",
+      "death_damage": 6
+    },
+    {
+      "id": "persistent",
+      "name": "Persistent",
+      "description": "Higher status resistance.",
+      "stability_delta": 4
+    },
+    {
+      "id": "overclocked",
+      "name": "Overclocked",
+      "description": "Faster but less stable.",
+      "speed_delta": 4,
+      "stability_delta": -3
+    },
+    {
+      "id": "encrypted",
+      "name": "Encrypted",
+      "description": "Harder to affect with hostile actions.",
+      "incoming_effect_resistance": 10
+    },
+    {
+      "id": "glitched",
+      "name": "Glitched",
+      "description": "Small random bonus or penalty on actions.",
+      "glitch_min": -5,
+      "glitch_max": 5
+    }
+  ],
+  "statuses": [
+    {
+      "id": "corrupted",
+      "name": "Corrupted",
+      "accuracy_delta": -10,
+      "speed_delta": 0,
+      "stability_delta": 0,
+      "dot_damage": 0,
+      "is_positive": false
+    },
+    {
+      "id": "leaking",
+      "name": "Leaking",
+      "accuracy_delta": 0,
+      "speed_delta": 0,
+      "stability_delta": 0,
+      "dot_damage": 3,
+      "is_positive": false
+    },
+    {
+      "id": "delayed",
+      "name": "Delayed",
+      "accuracy_delta": 0,
+      "speed_delta": -4,
+      "stability_delta": 0,
+      "dot_damage": 0,
+      "is_positive": false
+    },
+    {
+      "id": "stabilized",
+      "name": "Stabilized",
+      "accuracy_delta": 0,
+      "speed_delta": 0,
+      "stability_delta": 4,
+      "dot_damage": 0,
+      "is_positive": true
+    }
+  ],
+  "unlock_rules": [
+    {
+      "id": "rule_first_capture",
+      "trigger": "first_capture",
+      "unlock_starters": ["memoryleaker"],
+      "unlock_modifiers": ["intensify"]
+    },
+    {
+      "id": "rule_first_boss_reached",
+      "trigger": "first_boss_reached",
+      "unlock_starters": ["scheduler"]
+    },
+    {
+      "id": "rule_first_win",
+      "trigger": "first_win",
+      "unlock_starters": ["nullpointer"],
+      "unlock_traits": ["glitched"]
+    },
+    {
+      "id": "rule_use_firewall",
+      "trigger": "use_archetype:firewall",
+      "unlock_modifiers": ["unstable"]
+    }
+  ],
+  "boss": {
+    "archetype": "scheduler",
+    "modifier": "unstable",
+    "integrity_bonus": 14,
+    "speed_bonus": 4,
+    "stability_bonus": 5
+  },
+  "logs": [
+    "[LOG_01] \"we built this system to be free...\"",
+    "[LOG_02] \"a lock can become a doctrine faster than you think.\"",
+    "[LOG_03] \"the network still remembers what it was before control hardened.\""
+  ],
+  "node_names": [
+    "data.cache",
+    "auth.layer",
+    "core.link",
+    "index.mesh",
+    "vault.echo",
+    "relay.loop",
+    "mirror.heap",
+    "signal.root"
+  ]
+}
