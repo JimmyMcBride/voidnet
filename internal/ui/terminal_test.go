@@ -66,6 +66,37 @@ func TestApplyChoiceResetsSelectionToFirstOption(t *testing.T) {
 	}
 }
 
+func TestPlaybackBeatTimingUsesModerateProfile(t *testing.T) {
+	prelude := buildPreludeBeats([]string{"Entered signal.root.", "Encountered NullPointer."})
+	if len(prelude) != 2 {
+		t.Fatalf("expected 2 prelude beats, got %d", len(prelude))
+	}
+	if prelude[0].delay != playbackIntroDelay || prelude[0].phase != "LINK ESTABLISHED" {
+		t.Fatalf("expected intro beats to use the slower entry timing and phase, got %+v", prelude[0])
+	}
+
+	beats := buildActionBeats(actorEnemy, app.Scene{Combat: &app.CombatView{Round: 1}}, []string{
+		"Enemy NullPointer used Spike + Single.",
+		"Success chance 66% (base 90, target resistance -10, stability diff -4). Roll 78.",
+		"Your Firewall took 11 damage.",
+	})
+	if len(beats) != 4 {
+		t.Fatalf("expected 4 action beats, got %d", len(beats))
+	}
+	if beats[0].delay != playbackTurnDelay || beats[0].phase != "HOSTILE EXECUTION" {
+		t.Fatalf("expected enemy turn beat to use slower turn timing, got %+v", beats[0])
+	}
+	if beats[1].delay != playbackActionDelay || beats[1].phase != "ABILITY PRIMED" {
+		t.Fatalf("expected action beat timing, got %+v", beats[1])
+	}
+	if beats[2].delay != playbackRollDelay || beats[2].phase != "RESOLUTION CHECK" {
+		t.Fatalf("expected roll beat timing, got %+v", beats[2])
+	}
+	if beats[3].delay != playbackImpactDelay || beats[3].phase != "PAYLOAD LANDED" || !beats[3].applyScene {
+		t.Fatalf("expected impact beat timing and scene application, got %+v", beats[3])
+	}
+}
+
 func TestCombatPlaybackDefersEnemyFirstDamageUntilImpactBeat(t *testing.T) {
 	reg, err := content.Load()
 	if err != nil {
@@ -135,6 +166,24 @@ func TestFastForwardPlaybackAppliesResolvedEnemySequence(t *testing.T) {
 	}
 	if !model.scene.Combat.PlayerTurn {
 		t.Fatalf("expected control to return to the player after fast-forwarded enemy turn")
+	}
+}
+
+func TestCombatEncounterShowsPlaybackPhaseSignal(t *testing.T) {
+	model := newCombatTestModel(t, 2)
+
+	lines := model.renderCombatEncounterLines(model.panelWidth(), true)
+	rendered := strings.Join(lines, "\n")
+	if !strings.Contains(rendered, colorize(ansiBold+ansiCyan, "LINK ESTABLISHED")) {
+		t.Fatalf("expected entry playback phase signal, got:\n%s", rendered)
+	}
+
+	model.advancePlayback()
+	model.advancePlayback()
+	lines = model.renderCombatEncounterLines(model.panelWidth(), true)
+	rendered = strings.Join(lines, "\n")
+	if !strings.Contains(rendered, colorize(ansiBold+ansiRed, "HOSTILE EXECUTION")) {
+		t.Fatalf("expected enemy turn phase signal, got:\n%s", rendered)
 	}
 }
 
@@ -339,6 +388,68 @@ func TestCombatMenuShowsSelectedChoicePreview(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "Press i for full command detail.") {
 		t.Fatalf("expected modal hint in combat menu, got:\n%s", rendered)
+	}
+}
+
+func TestSpaceNoLongerSelectsMenusAndEnterStillDoes(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
+	m := newModel(session)
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	afterSpace := updated.(model)
+	if afterSpace.scene.Kind != "starter_select" {
+		t.Fatalf("expected space to stop acting as menu confirm, got scene %q", afterSpace.scene.Kind)
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	afterEnter := updated.(model)
+	if afterEnter.scene.Kind != "node_select" {
+		t.Fatalf("expected enter to remain the menu confirm key, got scene %q", afterEnter.scene.Kind)
+	}
+}
+
+func TestSpaceFastForwardsCombatPlaybackOnly(t *testing.T) {
+	m := newCombatTestModel(t, 2)
+	m.advancePlayback()
+	m.advancePlayback()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	next := updated.(model)
+	if next.playback != nil {
+		t.Fatalf("expected space to fast-forward the active enemy sequence")
+	}
+	if next.scene.Combat == nil || next.scene.Combat.Player.IntegrityCurrent != 44 {
+		t.Fatalf("expected space fast-forward to apply enemy impact, got %+v", next.scene.Combat)
+	}
+}
+
+func TestControlsHintReflectsSpacePlaybackAndEnterSelect(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
+	m := newModel(session)
+	if hint := m.controlsHint(); !strings.Contains(hint, "enter select") || strings.Contains(hint, "space select") {
+		t.Fatalf("expected non-combat hint to advertise enter-only selection, got %q", hint)
+	}
+
+	combatModel := newCombatTestModel(t, 2)
+	if hint := combatModel.controlsHint(); !strings.Contains(hint, "space fast-forward") {
+		t.Fatalf("expected playback hint to advertise space fast-forward, got %q", hint)
+	}
+
+	settleCombatPlayback(&combatModel)
+	if hint := combatModel.controlsHint(); !strings.Contains(hint, "enter select") || strings.Contains(hint, "space select") {
+		t.Fatalf("expected combat hint to advertise enter-only selection, got %q", hint)
 	}
 }
 

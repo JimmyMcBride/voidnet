@@ -30,11 +30,11 @@ const (
 )
 
 const (
-	playbackIntroDelay  = 140 * time.Millisecond
-	playbackTurnDelay   = 180 * time.Millisecond
-	playbackActionDelay = 140 * time.Millisecond
-	playbackRollDelay   = 120 * time.Millisecond
-	playbackImpactDelay = 180 * time.Millisecond
+	playbackIntroDelay  = 220 * time.Millisecond
+	playbackTurnDelay   = 320 * time.Millisecond
+	playbackActionDelay = 260 * time.Millisecond
+	playbackRollDelay   = 220 * time.Millisecond
+	playbackImpactDelay = 520 * time.Millisecond
 )
 
 type model struct {
@@ -50,6 +50,8 @@ type model struct {
 	playbackLines       []string
 	playbackActor       string
 	playbackImpact      bool
+	playbackPhase       string
+	playbackPhaseStyle  string
 	combatLogLines      []string
 	combatLogScroll     int
 	combatLogAutoFollow bool
@@ -69,6 +71,8 @@ type playbackBeat struct {
 	actor      string
 	impact     bool
 	applyScene bool
+	phase      string
+	phaseStyle string
 }
 
 type playbackTickMsg struct{}
@@ -153,7 +157,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.playback != nil {
 			switch msg.String() {
-			case "enter", " ":
+			case "space", " ":
 				if cmd := m.fastForwardPlayback(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -170,7 +174,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedIndex = nextChoice(m.scene, m.selectedIndex)
 		case "i":
 			m.openChoiceModal()
-		case "enter", " ":
+		case "enter":
 			choice, ok := selectedChoice(m.scene, m.selectedIndex)
 			if ok {
 				cmds = append(cmds, m.applyChoice(choice.ID)...)
@@ -295,6 +299,8 @@ func (m *model) advancePlayback() tea.Cmd {
 		m.playbackLines = nil
 		m.playbackActor = ""
 		m.playbackImpact = false
+		m.playbackPhase = ""
+		m.playbackPhaseStyle = ""
 		if cmd := m.maybeAdvanceEnemy(); cmd != nil {
 			return cmd
 		}
@@ -309,6 +315,8 @@ func (m *model) advancePlayback() tea.Cmd {
 	m.playbackLines = append([]string(nil), beat.lines...)
 	m.playbackActor = beat.actor
 	m.playbackImpact = beat.impact
+	m.playbackPhase = beat.phase
+	m.playbackPhaseStyle = beat.phaseStyle
 	m.appendCombatLog(beat.lines)
 
 	cmds := []tea.Cmd{}
@@ -346,6 +354,8 @@ func (m *model) fastForwardPlayback() tea.Cmd {
 	m.playbackLines = nil
 	m.playbackActor = ""
 	m.playbackImpact = false
+	m.playbackPhase = ""
+	m.playbackPhaseStyle = ""
 
 	cmds := []tea.Cmd{}
 	if applyScene {
@@ -450,6 +460,7 @@ func (m model) renderCombat(width int) string {
 func (m model) renderCombatEncounterLines(width int, wide bool) []string {
 	combat := m.scene.Combat
 	turnLine := fmt.Sprintf("Round %d | %s", combat.Round, turnBanner(actorFromCombatView(combat), m.scene))
+	phaseLine := m.renderCombatPhaseLine()
 	enemyLabel := colorize(ansiRed, fmt.Sprintf("%s [%s]", combat.Enemy.Label, combat.NodeType))
 	playerLabel := colorize(ansiCyan, combat.Player.Label)
 	switch m.playbackActor {
@@ -478,16 +489,27 @@ func (m model) renderCombatEncounterLines(width int, wide bool) []string {
 		fmt.Sprintf("Status: %s | %s", strings.Join(combat.Player.Statuses, ", "), barLine(m.playerBar.View(), combat.Player.IntegrityCurrent, combat.Player.IntegrityMax)),
 	}
 	if wide {
-		return append([]string{turnLine}, sideBySideLines(enemyLines, playerLines, width, 4)...)
+		return append([]string{turnLine, phaseLine}, sideBySideLines(enemyLines, playerLines, width, 4)...)
 	}
 
 	return []string{
 		turnLine,
+		phaseLine,
 		enemyLines[0],
 		enemyLines[1],
 		playerLines[0],
 		playerLines[1],
 	}
+}
+
+func (m model) renderCombatPhaseLine() string {
+	if m.playbackPhase != "" {
+		return colorize(m.playbackPhaseStyle, m.playbackPhase)
+	}
+	if m.scene.Combat != nil && m.scene.Combat.PlayerTurn {
+		return colorize(ansiDim+ansiGreen, "AWAITING COMMAND INPUT")
+	}
+	return colorize(ansiDim+ansiYellow, "COMBAT LINK STANDBY")
 }
 
 func (m model) renderCombatLog(width int, bodyHeight int) string {
@@ -1418,12 +1440,12 @@ func (m model) controlsHint() string {
 		return fmt.Sprintf("controls: i/esc/q close detail | scene=%s", m.scene.Kind)
 	}
 	if m.playback != nil {
-		return fmt.Sprintf("controls: gg/G/ctrl+u/ctrl+d log | enter/space fast-forward | q quit | scene=%s", m.scene.Kind)
+		return fmt.Sprintf("controls: gg/G/ctrl+u/ctrl+d log | space fast-forward | q quit | scene=%s", m.scene.Kind)
 	}
 	if m.scene.Combat != nil {
-		return fmt.Sprintf("controls: j/k menu | i detail | gg/G/ctrl+u/ctrl+d log | enter/space select | q quit | scene=%s", m.scene.Kind)
+		return fmt.Sprintf("controls: j/k menu | i detail | gg/G/ctrl+u/ctrl+d log | enter select | q quit | scene=%s", m.scene.Kind)
 	}
-	return fmt.Sprintf("controls: up/down or j/k | enter/space select | q quit | scene=%s", m.scene.Kind)
+	return fmt.Sprintf("controls: up/down or j/k | enter select | q quit | scene=%s", m.scene.Kind)
 }
 
 func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool) string {
@@ -1432,6 +1454,9 @@ func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool)
 
 func (m model) renderCombatMenuLines() []string {
 	lines := renderMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+	if m.playback != nil {
+		return lines
+	}
 	detail := m.selectedChoiceDetails()
 	if detail == nil {
 		return lines
@@ -1467,7 +1492,7 @@ func renderMenuLines(choices []app.Choice, selectedIndex int, locked bool) []str
 		lines = append(lines, colorize(ansiDim, "No available actions"))
 	}
 	if locked {
-		lines = append(lines, "", colorize(ansiYellow, "Sequence running. Enter/Space fast-forward."))
+		lines = append(lines, "", colorize(ansiYellow, "Sequence running. Space fast-forward."))
 	}
 	return lines
 }
@@ -1579,8 +1604,10 @@ func buildPreludeBeats(lines []string) []playbackBeat {
 	beats := make([]playbackBeat, 0, len(lines))
 	for _, line := range lines {
 		beats = append(beats, playbackBeat{
-			lines: []string{line},
-			delay: playbackIntroDelay,
+			lines:      []string{line},
+			delay:      playbackIntroDelay,
+			phase:      "LINK ESTABLISHED",
+			phaseStyle: ansiBold + ansiCyan,
 		})
 	}
 	return beats
@@ -1592,9 +1619,11 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 	}
 
 	beats := []playbackBeat{{
-		lines: []string{turnBanner(actor, scene)},
-		delay: playbackTurnDelay,
-		actor: actor,
+		lines:      []string{turnBanner(actor, scene)},
+		delay:      playbackTurnDelay,
+		actor:      actor,
+		phase:      playbackTurnPhase(actor),
+		phaseStyle: playbackActorStyle(actor),
 	}}
 	if len(lines) == 0 {
 		return beats
@@ -1607,22 +1636,28 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 			actor:      actor,
 			impact:     true,
 			applyScene: true,
+			phase:      "PAYLOAD LANDED",
+			phaseStyle: ansiBold + ansiYellow,
 		})
 		return beats
 	}
 
 	beats = append(beats, playbackBeat{
-		lines: []string{lines[0]},
-		delay: playbackActionDelay,
-		actor: actor,
+		lines:      []string{lines[0]},
+		delay:      playbackActionDelay,
+		actor:      actor,
+		phase:      "ABILITY PRIMED",
+		phaseStyle: playbackActorStyle(actor),
 	})
 
 	index := 1
 	if index < len(lines) && isRollLine(lines[index]) {
 		beats = append(beats, playbackBeat{
-			lines: []string{lines[index]},
-			delay: playbackRollDelay,
-			actor: actor,
+			lines:      []string{lines[index]},
+			delay:      playbackRollDelay,
+			actor:      actor,
+			phase:      "RESOLUTION CHECK",
+			phaseStyle: ansiBold + ansiYellow,
 		})
 		index++
 	}
@@ -1634,6 +1669,8 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 			actor:      actor,
 			impact:     true,
 			applyScene: true,
+			phase:      "PAYLOAD LANDED",
+			phaseStyle: ansiBold + ansiYellow,
 		})
 		return beats
 	}
@@ -1642,7 +1679,31 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 	beats[last].impact = true
 	beats[last].applyScene = true
 	beats[last].delay = playbackImpactDelay
+	beats[last].phase = "PAYLOAD LANDED"
+	beats[last].phaseStyle = ansiBold + ansiYellow
 	return beats
+}
+
+func playbackTurnPhase(actor string) string {
+	switch actor {
+	case actorEnemy:
+		return "HOSTILE EXECUTION"
+	case actorPlayer:
+		return "OPERATOR EXECUTION"
+	default:
+		return "COMBAT SEQUENCE"
+	}
+}
+
+func playbackActorStyle(actor string) string {
+	switch actor {
+	case actorEnemy:
+		return ansiBold + ansiRed
+	case actorPlayer:
+		return ansiBold + ansiCyan
+	default:
+		return ansiBold + ansiYellow
+	}
 }
 
 func turnBanner(actor string, scene app.Scene) string {
