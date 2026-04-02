@@ -201,7 +201,7 @@ func (m model) View() tea.View {
 	content := m.render()
 	v := tea.NewView(content)
 	v.AltScreen = true
-	v.WindowTitle = "System Breakers"
+	v.WindowTitle = "Voidnet"
 	return v
 }
 
@@ -1182,15 +1182,38 @@ func (m model) renderNodeSelect(width int) string {
 }
 
 func renderLogo(scene app.Scene, width int) string {
+	screenWidth := width + 4
 	logo := []string{
-		colorize(ansiBold+ansiCyan, "   _____           __                 ____                 __                  "),
-		colorize(ansiBold+ansiCyan, "  / ___/__  ______/ /____  ____ ___  / __ )_______  ____ _/ /_____  __________"),
-		colorize(ansiBold+ansiCyan, "  \\__ \\/ / / ___/ __/ _ \\/ __ `__ \\/ __  / ___/ _ \\/ __ `/ //_/ _ \\/ ___/ ___/"),
-		colorize(ansiBold+ansiCyan, " ___/ / / (__  ) /_/  __/ / / / / / /_/ / /  /  __/ /_/ / ,< /  __/ /  (__  ) "),
-		colorize(ansiBold+ansiCyan, "/____/_/ /____/\\__/\\___/_/ /_/ /_/_____/ /   \\___/\\__,_/_/|_|\\___/_/  /____/  "),
-		centerLine(colorize(ansiGreen, ":: "+strings.ToUpper(scene.Title)+" ::"), width),
+		renderLogoLine(" _    __      _     __           __ ", screenWidth, ".::", "::."),
+		renderLogoLine("| |  / /___  (_)___/ /___  ___  / /_", screenWidth, "//:", ":\\\\"),
+		renderLogoLine("| | / / __ \\/ / __  / __ \\/ _ \\/ __/", screenWidth, "[[ ", " ]]"),
+		renderLogoLine("| |/ / /_/ / / /_/ / / / /  __/ /_  ", screenWidth, "\\\\:", "://"),
+		renderLogoLine("|___/\\____/_/\\__,_/_/ /_/\\___/\\__/  ", screenWidth, "`::", "::'"),
+		centerLine(colorize(ansiGreen, ":: "+strings.ToUpper(scene.Title)+" ::"), screenWidth),
 	}
 	return strings.Join(logo, "\n")
+}
+
+func renderLogoLine(text string, width int, leftAccent string, rightAccent string) string {
+	text = colorize(ansiBold+ansiCyan, text)
+	left := colorize(ansiDim+ansiCyan, leftAccent)
+	right := colorize(ansiDim+ansiCyan, rightAccent)
+
+	extra := width - visibleWidth(text)
+	if extra <= 0 {
+		return text
+	}
+
+	leftSpan := extra / 2
+	rightSpan := extra - leftSpan
+	accentWidth := visibleWidth(left) + visibleWidth(right) + 2
+	if extra < accentWidth+4 {
+		return centerLine(text, width)
+	}
+
+	leftPad := max(0, leftSpan-visibleWidth(left)-1)
+	rightPad := max(0, rightSpan-visibleWidth(right)-1)
+	return strings.Repeat(" ", leftPad) + left + " " + text + " " + right + strings.Repeat(" ", rightPad)
 }
 
 func sceneHeader(scene app.Scene) string {

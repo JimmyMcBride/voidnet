@@ -389,6 +389,29 @@ func TestCombatRenderFitsViewport(t *testing.T) {
 	}
 }
 
+func TestRenderLogoCentersBannerAndAddsSideAccents(t *testing.T) {
+	scene := app.Scene{Title: "Select Node"}
+
+	logo := renderLogo(scene, 74)
+	lines := strings.Split(logo, "\n")
+	if len(lines) != 6 {
+		t.Fatalf("expected 6 logo lines, got %d", len(lines))
+	}
+
+	if !strings.Contains(lines[0], ".::") || !strings.Contains(lines[0], "::.") {
+		t.Fatalf("expected decorative accents on top logo line, got %q", lines[0])
+	}
+	if !strings.Contains(lines[2], "[[ ") || !strings.Contains(lines[2], " ]]") {
+		t.Fatalf("expected mirrored midline accents, got %q", lines[2])
+	}
+
+	const banner = "_    __      _     __           __"
+	leftPad := strings.Index(lines[0], banner)
+	if leftPad < 10 {
+		t.Fatalf("expected banner to be centered with visible left padding, got %q", lines[0])
+	}
+}
+
 func TestNodeGlyphUsesCurrentAndTypeMarkers(t *testing.T) {
 	tests := []struct {
 		name     string

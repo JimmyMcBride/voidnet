@@ -28,7 +28,21 @@ func DefaultPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("user config dir: %w", err)
 	}
-	return filepath.Join(root, "system-breakers", "meta.json"), nil
+	newPath := filepath.Join(root, "voidnet", "meta.json")
+	if _, err := os.Stat(newPath); err == nil {
+		return newPath, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("stat meta state: %w", err)
+	}
+
+	legacyPath := filepath.Join(root, "system-breakers", "meta.json")
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("stat legacy meta state: %w", err)
+	}
+
+	return newPath, nil
 }
 
 func NewStore(path string) *Store {

@@ -235,4 +235,53 @@ func TestInspectSceneIncludesStatGlossary(t *testing.T) {
 	if !strings.Contains(rendered, "STB Stability: resists hostile effects and lowers isolation chance against this daemon.") {
 		t.Fatalf("expected inspect scene to explain Stability, got:\n%s", rendered)
 	}
+	if !strings.Contains(rendered, "Status reference:") {
+		t.Fatalf("expected inspect scene to include status reference, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Corrupted: -10 accuracy") {
+		t.Fatalf("expected inspect scene to explain core status effects, got:\n%s", rendered)
+	}
+}
+
+func TestInspectSceneExplainsTraitsAndActiveStatuses(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	store := meta.NewStore(t.TempDir() + "/meta.json")
+	session := NewSession(reg, store, state, 123, true)
+
+	if _, _, err := session.Apply("starter:firewall"); err != nil {
+		t.Fatalf("starter apply failed: %v", err)
+	}
+	if _, _, err := session.Apply("node:n1"); err != nil {
+		t.Fatalf("node apply failed: %v", err)
+	}
+
+	player := session.engine.ActiveDaemon()
+	player.TraitID = "encrypted"
+	player.Statuses = map[string]int{"corrupted": 2}
+	session.engine.Run.Combat.Enemy.TraitID = "overclocked"
+	session.engine.Run.Combat.Enemy.Statuses = map[string]int{"leaking": 3, "delayed": 1}
+
+	scene, _, err := session.Apply("inspect")
+	if err != nil {
+		t.Fatalf("inspect apply failed: %v", err)
+	}
+
+	rendered := strings.Join(scene.Lines, "\n")
+	if !strings.Contains(rendered, "Trait: Encrypted - 10 hostile-effect resistance") {
+		t.Fatalf("expected inspect scene to explain trait mechanics, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Active status: Corrupted(2): -10 accuracy") {
+		t.Fatalf("expected inspect scene to explain player active status, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Trait: Overclocked - +4 speed, -3 stability") {
+		t.Fatalf("expected inspect scene to explain enemy trait mechanics, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Leaking(3): 3 damage at end of turn") || !strings.Contains(rendered, "Delayed(1): -4 speed") {
+		t.Fatalf("expected inspect scene to explain enemy active statuses, got:\n%s", rendered)
+	}
 }

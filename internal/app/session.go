@@ -117,7 +117,7 @@ func (s *Session) Snapshot() Scene {
 		}
 		return Scene{
 			Kind:  string(run.Phase),
-			Title: fmt.Sprintf("System Breakers | Seed %d", run.Seed),
+			Title: fmt.Sprintf("Voidnet | Seed %d", run.Seed),
 			Lines: []string{
 				"Select a starter daemon.",
 				"Capture unlocks new starters and modifiers between runs.",
@@ -218,18 +218,19 @@ func (s *Session) Snapshot() Scene {
 	case game.PhaseInspect:
 		active := s.engine.ActiveDaemon()
 		enemy := run.Combat.Enemy
-		lines := []string{
-			daemonSummary(combatantName("Your", active), active, s.registry),
-			fmt.Sprintf("Abilities: %s, %s", abilityLabel(active.Abilities[0], s.registry), abilityLabel(active.Abilities[1], s.registry)),
-			"",
-			daemonSummary(combatantName("Enemy", &enemy), &enemy, s.registry),
-			fmt.Sprintf("Abilities: %s, %s", abilityLabel(enemy.Abilities[0], s.registry), abilityLabel(enemy.Abilities[1], s.registry)),
+		lines := append([]string{}, inspectCombatantLines("Your", active, s.registry)...)
+		lines = append(lines, "")
+		lines = append(lines, inspectCombatantLines("Enemy", &enemy, s.registry)...)
+		lines = append(lines,
 			"",
 			"Stat key:",
 			"INT Integrity: how much damage a daemon can take before crashing.",
 			"SPD Speed: who acts first each round.",
 			"STB Stability: resists hostile effects and lowers isolation chance against this daemon.",
-		}
+			"",
+			"Status reference:",
+		)
+		lines = append(lines, statusReferenceLines(s.registry)...)
 		return Scene{
 			Kind:    string(run.Phase),
 			Title:   "Inspect",
@@ -405,6 +406,31 @@ func daemonSummary(label string, d *game.Daemon, registry *content.Registry) str
 	return fmt.Sprintf("%s %d/%d INT | SPD %d | STB %d | %s", label, d.Integrity, d.MaxIntegrity, d.Speed, d.Stability, trait.Name)
 }
 
+func inspectCombatantLines(side string, d *game.Daemon, registry *content.Registry) []string {
+	if d == nil {
+		return []string{side + " daemon unavailable."}
+	}
+
+	trait := registry.Traits[d.TraitID]
+	lines := []string{
+		daemonSummary(combatantName(side, d), d, registry),
+		fmt.Sprintf("Abilities: %s, %s", abilityLabel(d.Abilities[0], registry), abilityLabel(d.Abilities[1], registry)),
+		fmt.Sprintf("Trait: %s - %s", trait.Name, traitEffectSummary(trait)),
+	}
+
+	statusLines := activeStatusLines(d.Statuses, registry)
+	if len(statusLines) == 1 {
+		lines = append(lines, "Active status: "+statusLines[0])
+	} else {
+		lines = append(lines, "Active statuses:")
+		for _, line := range statusLines {
+			lines = append(lines, "  "+line)
+		}
+	}
+
+	return lines
+}
+
 func abilityLabel(ability game.Ability, registry *content.Registry) string {
 	effect := registry.Effects[ability.EffectID]
 	modifier := registry.Modifiers[ability.ModifierID]
@@ -500,6 +526,32 @@ func inspectDetails() *ChoiceDetails {
 	}
 }
 
+func traitEffectSummary(trait content.TraitDef) string {
+	parts := []string{}
+	if trait.SpeedDelta != 0 {
+		parts = append(parts, fmt.Sprintf("%+d speed", trait.SpeedDelta))
+	}
+	if trait.StabilityDelta != 0 {
+		parts = append(parts, fmt.Sprintf("%+d stability", trait.StabilityDelta))
+	}
+	if trait.AccuracyDelta != 0 {
+		parts = append(parts, fmt.Sprintf("%+d accuracy", trait.AccuracyDelta))
+	}
+	if trait.IncomingEffectResistance != 0 {
+		parts = append(parts, fmt.Sprintf("%d hostile-effect resistance", trait.IncomingEffectResistance))
+	}
+	if trait.DeathDamage != 0 {
+		parts = append(parts, fmt.Sprintf("deals %d damage on crash", trait.DeathDamage))
+	}
+	if trait.GlitchMin != 0 || trait.GlitchMax != 0 {
+		parts = append(parts, fmt.Sprintf("random %+d to %+d action bonus", trait.GlitchMin, trait.GlitchMax))
+	}
+	if len(parts) == 0 {
+		return trait.Description
+	}
+	return strings.Join(parts, ", ")
+}
+
 func statusEffectSummary(status content.StatusDef) string {
 	parts := []string{}
 	if status.AccuracyDelta != 0 {
@@ -518,6 +570,31 @@ func statusEffectSummary(status content.StatusDef) string {
 		return "no direct stat change"
 	}
 	return strings.Join(parts, ", ")
+}
+
+func activeStatusLines(statuses map[string]int, registry *content.Registry) []string {
+	if len(statuses) == 0 {
+		return []string{"None"}
+	}
+	keys := make([]string, 0, len(statuses))
+	for statusID := range statuses {
+		keys = append(keys, statusID)
+	}
+	slices.Sort(keys)
+	lines := make([]string, 0, len(statuses))
+	for _, statusID := range keys {
+		status := registry.Statuses[statusID]
+		lines = append(lines, fmt.Sprintf("%s(%d): %s", status.Name, statuses[statusID], statusEffectSummary(status)))
+	}
+	return lines
+}
+
+func statusReferenceLines(registry *content.Registry) []string {
+	lines := make([]string, 0, len(registry.Data.Statuses))
+	for _, status := range registry.Data.Statuses {
+		lines = append(lines, fmt.Sprintf("%s: %s", status.Name, statusEffectSummary(status)))
+	}
+	return lines
 }
 
 func formatStatuses(statuses map[string]int, registry *content.Registry) string {
