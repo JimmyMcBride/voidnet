@@ -1236,6 +1236,9 @@ func sceneHeader(scene app.Scene) string {
 }
 
 func decorateLines(scene app.Scene) []string {
+	if scene.Kind == "inspect" {
+		return decorateInspectLines(scene.Lines)
+	}
 	lines := make([]string, 0, len(scene.Lines)+4)
 	for _, line := range scene.Lines {
 		if strings.TrimSpace(line) == "" {
@@ -1245,6 +1248,39 @@ func decorateLines(scene app.Scene) []string {
 		lines = append(lines, stylizeLine(line))
 	}
 	return lines
+}
+
+func decorateInspectLines(lines []string) []string {
+	out := make([]string, 0, len(lines)+6)
+	for _, line := range lines {
+		switch {
+		case strings.TrimSpace(line) == "":
+			out = append(out, colorize(ansiDim+ansiCyan, "····················"))
+		case strings.HasPrefix(line, "Your "):
+			out = append(out, stylizeTraceSummary(line, ansiCyan))
+		case strings.HasPrefix(line, "Enemy "):
+			out = append(out, stylizeTraceSummary(line, ansiRed))
+		case strings.HasPrefix(line, "Abilities:"):
+			out = append(out, stylizeTraceAbilities(line))
+		case strings.HasPrefix(line, "Trait:"):
+			out = append(out, stylizeTraceTrait(line))
+		case strings.HasPrefix(line, "Active status:"):
+			out = append(out, stylizeTraceStatusLine(line))
+		case strings.HasPrefix(line, "Active statuses:"):
+			out = append(out, colorize(ansiBold+ansiGreen, "Active statuses:"))
+		case strings.HasPrefix(line, "  "):
+			out = append(out, "  "+stylizeTraceStatusLine(strings.TrimSpace(line)))
+		case strings.HasSuffix(line, ":"):
+			out = append(out, colorize(ansiBold+ansiGreen, line))
+		case strings.HasPrefix(line, "INT ") || strings.HasPrefix(line, "SPD ") || strings.HasPrefix(line, "STB "):
+			out = append(out, stylizeTraceGlossary(line))
+		case strings.Contains(line, ": "):
+			out = append(out, stylizeTraceReferenceLine(line))
+		default:
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 func stylizeLine(line string) string {
@@ -1257,6 +1293,123 @@ func stylizeLine(line string) string {
 		return colorize(ansiDim, line)
 	default:
 		return line
+	}
+}
+
+func stylizeTraceSummary(line string, actorColor string) string {
+	parts := strings.Split(line, " | ")
+	if len(parts) == 0 {
+		return line
+	}
+
+	var out []string
+	for i, part := range parts {
+		switch {
+		case i == 0:
+			head, tail, ok := strings.Cut(part, " ")
+			if !ok {
+				out = append(out, colorize(ansiBold+actorColor, part))
+				continue
+			}
+			out = append(out, colorize(ansiBold+actorColor, head+" ")+colorize(ansiBold, tail))
+		case strings.Contains(part, " INT"):
+			out = append(out, colorize(ansiBold+ansiYellow, part))
+		case strings.HasPrefix(part, "SPD "):
+			out = append(out, colorize(ansiBold+ansiCyan, part))
+		case strings.HasPrefix(part, "STB "):
+			out = append(out, colorize(ansiBold+ansiGreen, part))
+		default:
+			out = append(out, colorize(ansiBold+ansiYellow, part))
+		}
+	}
+	return strings.Join(out, colorize(ansiDim, " | "))
+}
+
+func stylizeTraceAbilities(line string) string {
+	label, rest, ok := strings.Cut(line, ": ")
+	if !ok {
+		return line
+	}
+	parts := strings.Split(rest, ", ")
+	for i, part := range parts {
+		parts[i] = colorize(ansiBold+ansiYellow, part)
+	}
+	return colorize(ansiCyan, label+": ") + strings.Join(parts, colorize(ansiDim, ", "))
+}
+
+func stylizeTraceTrait(line string) string {
+	label, rest, ok := strings.Cut(line, ": ")
+	if !ok {
+		return line
+	}
+	name, detail, hasDetail := strings.Cut(rest, " - ")
+	styled := colorize(ansiGreen, label+": ") + colorize(ansiBold+ansiYellow, name)
+	if hasDetail {
+		styled += colorize(ansiDim, " - ") + stylizeSignedTerms(detail)
+	}
+	return styled
+}
+
+func stylizeTraceStatusLine(line string) string {
+	label, rest, ok := strings.Cut(line, ": ")
+	if !ok {
+		return line
+	}
+	if rest == "None" {
+		return colorize(ansiCyan, label+": ") + colorize(ansiDim, rest)
+	}
+	return colorize(ansiCyan, label+": ") + stylizeTraceStatusPayload(rest)
+}
+
+func stylizeTraceStatusPayload(payload string) string {
+	name, detail, hasDetail := strings.Cut(payload, ": ")
+	styled := colorize(ansiBold+ansiYellow, name)
+	if hasDetail {
+		styled += colorize(ansiDim, ": ") + stylizeSignedTerms(detail)
+	}
+	return styled
+}
+
+func stylizeTraceGlossary(line string) string {
+	code, rest, ok := strings.Cut(line, " ")
+	if !ok {
+		return line
+	}
+	label, detail, ok := strings.Cut(rest, ": ")
+	if !ok {
+		return colorize(ansiBold+ansiGreen, line)
+	}
+	return colorize(ansiBold+ansiGreen, code+" ") + colorize(ansiBold+ansiYellow, label) + colorize(ansiDim, ": ") + detail
+}
+
+func stylizeTraceReferenceLine(line string) string {
+	label, detail, ok := strings.Cut(line, ": ")
+	if !ok {
+		return line
+	}
+	return colorize(ansiBold+ansiYellow, label) + colorize(ansiDim, ": ") + stylizeSignedTerms(detail)
+}
+
+func stylizeSignedTerms(text string) string {
+	parts := strings.Split(text, ", ")
+	for i, part := range parts {
+		parts[i] = stylizeSignedTerm(part)
+	}
+	return strings.Join(parts, colorize(ansiDim, ", "))
+}
+
+func stylizeSignedTerm(part string) string {
+	switch {
+	case strings.HasPrefix(part, "+"):
+		return colorize(ansiBold+ansiGreen, part)
+	case strings.HasPrefix(part, "-"):
+		return colorize(ansiBold+ansiRed, part)
+	case strings.HasPrefix(part, "deals "), strings.HasPrefix(part, "random "), strings.Contains(part, "damage"):
+		return colorize(ansiYellow, part)
+	case strings.Contains(part, "resistance"):
+		return colorize(ansiCyan, part)
+	default:
+		return part
 	}
 }
 

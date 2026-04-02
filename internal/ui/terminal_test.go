@@ -412,6 +412,41 @@ func TestRenderLogoCentersBannerAndAddsSideAccents(t *testing.T) {
 	}
 }
 
+func TestDecorateLinesStylesTraceView(t *testing.T) {
+	scene := app.Scene{
+		Kind: "inspect",
+		Lines: []string{
+			"Your Firewall 41/47 INT | SPD 7 | STB 11 | Volatile",
+			"Abilities: Spike + Unstable, Corrupt + Intensify",
+			"Trait: Volatile - deals 6 damage on crash",
+			"Active status: Corrupted(2): -10 accuracy",
+			"",
+			"Stat key:",
+			"STB Stability: resists hostile effects and lowers isolation chance against this daemon.",
+			"Corrupted: -10 accuracy",
+		},
+	}
+
+	lines := decorateLines(scene)
+	rendered := strings.Join(lines, "\n")
+
+	if !strings.Contains(rendered, colorize(ansiBold+ansiCyan, "Your ")) {
+		t.Fatalf("expected player trace summary emphasis, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, colorize(ansiCyan, "Abilities: ")) {
+		t.Fatalf("expected ability label styling, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, colorize(ansiGreen, "Trait: ")) {
+		t.Fatalf("expected trait label styling, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, colorize(ansiBold+ansiRed, "-10 accuracy")) {
+		t.Fatalf("expected negative status mechanics to be highlighted, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, colorize(ansiDim+ansiCyan, "····················")) {
+		t.Fatalf("expected decorative divider in trace view, got:\n%s", rendered)
+	}
+}
+
 func TestNodeGlyphUsesCurrentAndTypeMarkers(t *testing.T) {
 	tests := []struct {
 		name     string
