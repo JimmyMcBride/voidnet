@@ -207,10 +207,10 @@
   ],
   "boss": {
     "archetype": "scheduler",
-    "modifier": "unstable",
-    "integrity_bonus": 14,
-    "speed_bonus": 4,
-    "stability_bonus": 5
+    "modifier": "intensify",
+    "integrity_bonus": 10,
+    "speed_bonus": 2,
+    "stability_bonus": 3
   },
   "logs": [
     "[LOG_01] \"we built this system to be free...\"",

@@ -1,6 +1,7 @@
 package game
 
 import (
+	"math"
 	"testing"
 
 	"voidnet/internal/content"
@@ -36,29 +37,73 @@ func TestDeterministicStarterAndGraph(t *testing.T) {
 	}
 }
 
-func TestCaptureThreshold(t *testing.T) {
+func TestGraphAlwaysProvidesTwoNonBossFightsBeforeBoss(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	for seed := int64(1); seed <= 40; seed++ {
+		state := meta.DefaultState()
+		engine := New(reg, &state, seed, true)
+
+		if got := len(engine.Run.NodeOrder); got != 4 && got != 5 {
+			t.Fatalf("seed %d: expected 4 or 5 nodes, got %d", seed, got)
+		}
+
+		boss := engine.Run.Nodes["boss"]
+		if boss == nil || boss.Difficulty != 3 {
+			t.Fatalf("seed %d: expected boss difficulty 3, got %+v", seed, boss)
+		}
+
+		for _, nodeID := range engine.currentChoicesForNodesFrom("start") {
+			first := engine.Run.Nodes[nodeID]
+			if first == nil || first.Difficulty != 1 {
+				t.Fatalf("seed %d: expected first layer difficulty 1, got %+v", seed, first)
+			}
+			if len(first.Children) != 1 {
+				t.Fatalf("seed %d: expected one child from %s, got %v", seed, nodeID, first.Children)
+			}
+
+			second := engine.Run.Nodes[first.Children[0]]
+			if second == nil || second.ID == "boss" || second.Difficulty != 2 {
+				t.Fatalf("seed %d: expected second layer difficulty 2 before boss, got %+v", seed, second)
+			}
+			if len(second.Children) != 1 || second.Children[0] != "boss" {
+				t.Fatalf("seed %d: expected %s to lead directly to boss, got %v", seed, second.ID, second.Children)
+			}
+		}
+	}
+}
+
+func TestCaptureChanceUsesRebalancedValues(t *testing.T) {
 	reg, err := content.Load()
 	if err != nil {
 		t.Fatalf("content load failed: %v", err)
 	}
 	state := meta.DefaultState()
 	engine := New(reg, &state, 55, true)
-	if _, err := engine.ChooseStarter("firewall"); err != nil {
-		t.Fatalf("starter failed: %v", err)
-	}
-	nodeID := engine.NodeChoices()[0]
-	if _, err := engine.ChooseNode(nodeID); err != nil {
-		t.Fatalf("node failed: %v", err)
-	}
-
-	engine.Run.Combat.Enemy.Integrity = engine.Run.Combat.Enemy.MaxIntegrity
-	if _, eligible := engine.captureChance(); eligible {
-		t.Fatalf("expected capture to be ineligible over 50%% integrity")
+	engine.Run.Combat = &CombatState{
+		Enemy: Daemon{
+			MaxIntegrity: 100,
+			Integrity:    50,
+			Stability:    10,
+			Statuses:     map[string]int{},
+		},
 	}
 
-	engine.Run.Combat.Enemy.Integrity = engine.Run.Combat.Enemy.MaxIntegrity / 4
-	if chance, eligible := engine.captureChance(); !eligible || chance < 5 {
-		t.Fatalf("expected capture to be eligible with a clamped chance, got eligible=%v chance=%d", eligible, chance)
+	if chance, eligible := engine.captureChance(); !eligible || chance != 49 {
+		t.Fatalf("expected rebalanced mid-health capture chance, got eligible=%v chance=%d", eligible, chance)
+	}
+
+	engine.Run.Combat.Enemy.Integrity = 25
+	if chance, eligible := engine.captureChance(); !eligible || chance != 79 {
+		t.Fatalf("expected rebalanced low-health capture chance, got eligible=%v chance=%d", eligible, chance)
+	}
+
+	engine.Run.Combat.Enemy.Statuses["corrupted"] = 2
+	if chance, eligible := engine.captureChance(); !eligible || chance != 89 {
+		t.Fatalf("expected corrupted bonus to apply, got eligible=%v chance=%d", eligible, chance)
 	}
 }
 
@@ -122,5 +167,100 @@ func TestEnemyAvoidsPatchAtHighIntegrityWhenOffenseExists(t *testing.T) {
 	choice := engine.pickEnemyAbility()
 	if choice.EffectID == "patch" {
 		t.Fatalf("expected enemy to avoid patch at full integrity, chose %+v", choice)
+	}
+}
+
+func TestNonBossEnemiesUseRestrictedModifiers(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	for _, difficulty := range []int{1, 2, 3} {
+		for seed := int64(1); seed <= 40; seed++ {
+			state := meta.DefaultState()
+			engine := New(reg, &state, seed, true)
+			enemy := engine.generateEnemyForNode(&Node{ID: "sim", Type: NodeStandard, Difficulty: difficulty})
+
+			for _, ability := range enemy.Abilities {
+				if ability.ModifierID == "unstable" {
+					t.Fatalf("difficulty %d seed %d: expected non-boss enemies to avoid unstable, got %+v", difficulty, seed, enemy.Abilities)
+				}
+				if difficulty <= 2 && ability.ModifierID != "single" {
+					t.Fatalf("difficulty %d seed %d: expected early non-boss enemies to use single only, got %+v", difficulty, seed, enemy.Abilities)
+				}
+			}
+		}
+	}
+}
+
+func TestBossUsesRebalancedConfig(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	if reg.Data.Boss.Modifier != "intensify" || reg.Data.Boss.IntegrityBonus != 10 || reg.Data.Boss.SpeedBonus != 2 || reg.Data.Boss.StabilityBonus != 3 {
+		t.Fatalf("unexpected boss config: %+v", reg.Data.Boss)
+	}
+
+	state := meta.DefaultState()
+	engine := New(reg, &state, 7, true)
+	boss := engine.generateEnemyForNode(&Node{ID: "boss", Type: NodeBoss, Difficulty: 3})
+	for _, ability := range boss.Abilities {
+		if ability.ModifierID != "intensify" {
+			t.Fatalf("expected boss abilities to use intensify, got %+v", boss.Abilities)
+		}
+	}
+}
+
+func TestFinishCombatWinRestoresIntegrityAfterGrowth(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 11, true)
+	if _, err := engine.ChooseStarter("firewall"); err != nil {
+		t.Fatalf("starter failed: %v", err)
+	}
+
+	active := engine.ActiveDaemon()
+	beforeMax := active.MaxIntegrity
+	active.Integrity = 1
+	engine.Run.Nodes["test"] = &Node{ID: "test", Label: "test", Children: nil}
+	engine.Run.Combat = &CombatState{NodeID: "test"}
+
+	engine.finishCombatWin(false, nil, nil)
+
+	expectedMax := beforeMax + reg.Archetypes[active.ArchetypeID].Growth.Integrity
+	expectedAfterGrowth := min(expectedMax, 1+reg.Archetypes[active.ArchetypeID].Growth.Integrity)
+	expectedRecovery := max(6, int(math.Ceil(float64(expectedMax)*0.20)))
+	expectedIntegrity := min(expectedMax, expectedAfterGrowth+expectedRecovery)
+
+	if active.MaxIntegrity != expectedMax || active.Integrity != expectedIntegrity {
+		t.Fatalf("expected growth then recovery to apply, got max=%d integrity=%d want max=%d integrity=%d", active.MaxIntegrity, active.Integrity, expectedMax, expectedIntegrity)
+	}
+}
+
+func TestFinishCombatWinRecoveryCapsAtMaxIntegrity(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 19, true)
+	if _, err := engine.ChooseStarter("firewall"); err != nil {
+		t.Fatalf("starter failed: %v", err)
+	}
+
+	active := engine.ActiveDaemon()
+	active.Integrity = active.MaxIntegrity - 1
+	engine.Run.Nodes["test"] = &Node{ID: "test", Label: "test", Children: nil}
+	engine.Run.Combat = &CombatState{NodeID: "test"}
+
+	engine.finishCombatWin(false, nil, nil)
+
+	if active.Integrity != active.MaxIntegrity {
+		t.Fatalf("expected victory recovery to cap at max integrity, got %d/%d", active.Integrity, active.MaxIntegrity)
 	}
 }

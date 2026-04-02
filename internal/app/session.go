@@ -27,6 +27,49 @@ type Scene struct {
 	Title   string
 	Lines   []string
 	Choices []Choice
+	Combat  *CombatView
+	NodeMap *NodeMapView
+}
+
+type CombatView struct {
+	NodeType       string
+	Round          int
+	PlayerTurn     bool
+	LastResolution []string
+	Player         CombatantView
+	Enemy          CombatantView
+}
+
+type CombatantView struct {
+	Label            string
+	Trait            string
+	IntegrityCurrent int
+	IntegrityMax     int
+	Statuses         []string
+}
+
+type NodeMapView struct {
+	CurrentNodeID string
+	Nodes         []NodeMapNode
+	Edges         []NodeMapEdge
+}
+
+type NodeMapNode struct {
+	ID         string
+	Label      string
+	Type       string
+	Depth      int
+	Lane       int
+	Visible    bool
+	Resolved   bool
+	Failed     bool
+	Selectable bool
+	Current    bool
+}
+
+type NodeMapEdge struct {
+	From string
+	To   string
 }
 
 type Session struct {
@@ -76,8 +119,9 @@ func (s *Session) Snapshot() Scene {
 		}
 
 	case game.PhaseNodeSelect:
+		active := s.engine.ActiveDaemon()
 		lines := []string{
-			fmt.Sprintf("Active daemon: %s", daemonSummary(s.engine.ActiveDaemon().Name, s.engine.ActiveDaemon(), s.registry)),
+			fmt.Sprintf("Active daemon: %s", daemonSummary(active.Name, active, s.registry)),
 			"",
 			"Visible network nodes:",
 		}
@@ -107,7 +151,13 @@ func (s *Session) Snapshot() Scene {
 			}
 		}
 		choices = append(choices, Choice{ID: "quit", Label: "Quit", Enabled: true})
-		return Scene{Kind: string(run.Phase), Title: "Select Node", Lines: lines, Choices: choices}
+		return Scene{
+			Kind:    string(run.Phase),
+			Title:   "Select Node",
+			Lines:   lines,
+			Choices: choices,
+			NodeMap: buildNodeMapView(run, selectable),
+		}
 
 	case game.PhaseCombat:
 		combat := run.Combat
@@ -131,7 +181,32 @@ func (s *Session) Snapshot() Scene {
 			{ID: "inspect", Label: "Inspect", Enabled: true},
 			{ID: "quit", Label: "Quit", Enabled: true},
 		}
-		return Scene{Kind: string(run.Phase), Title: "Combat", Lines: lines, Choices: choices}
+		return Scene{
+			Kind:    string(run.Phase),
+			Title:   "Combat",
+			Lines:   lines,
+			Choices: choices,
+			Combat: &CombatView{
+				NodeType:       string(combat.NodeType),
+				Round:          combat.Round,
+				PlayerTurn:     s.engine.IsPlayerTurn(),
+				LastResolution: append([]string(nil), combat.LastLog...),
+				Player: CombatantView{
+					Label:            combatantName("Your", active),
+					Trait:            s.registry.Traits[active.TraitID].Name,
+					IntegrityCurrent: active.Integrity,
+					IntegrityMax:     active.MaxIntegrity,
+					Statuses:         formatStatusesList(active.Statuses, s.registry),
+				},
+				Enemy: CombatantView{
+					Label:            combatantName("Enemy", &combat.Enemy),
+					Trait:            s.registry.Traits[combat.Enemy.TraitID].Name,
+					IntegrityCurrent: combat.Enemy.Integrity,
+					IntegrityMax:     combat.Enemy.MaxIntegrity,
+					Statuses:         formatStatusesList(combat.Enemy.Statuses, s.registry),
+				},
+			},
+		}
 
 	case game.PhaseInspect:
 		active := s.engine.ActiveDaemon()
@@ -269,6 +344,20 @@ func (s *Session) Apply(choiceID string) (Scene, []Event, error) {
 		return s.Snapshot(), nil, err
 	}
 
+	return s.completeAction(lines)
+}
+
+func (s *Session) AdvanceEnemyTurn() (Scene, []Event, error) {
+	lines, err := s.engine.AdvanceEnemyTurn()
+	if err != nil {
+		return s.Snapshot(), nil, err
+	}
+
+	return s.completeAction(lines)
+}
+
+func (s *Session) completeAction(lines []string) (Scene, []Event, error) {
+
 	if s.engine.MetaDirty {
 		if saveErr := s.store.Save(s.metaState); saveErr != nil {
 			return s.Snapshot(), nil, saveErr
@@ -327,9 +416,125 @@ func formatStatuses(statuses map[string]int, registry *content.Registry) string 
 	return strings.Join(parts, ", ")
 }
 
+func formatStatusesList(statuses map[string]int, registry *content.Registry) []string {
+	if len(statuses) == 0 {
+		return []string{"None"}
+	}
+	keys := make([]string, 0, len(statuses))
+	for statusID := range statuses {
+		keys = append(keys, statusID)
+	}
+	slices.Sort(keys)
+	parts := make([]string, 0, len(statuses))
+	for _, statusID := range keys {
+		turns := statuses[statusID]
+		parts = append(parts, fmt.Sprintf("%s(%d)", registry.Statuses[statusID].Name, turns))
+	}
+	return parts
+}
+
 func combatantName(side string, daemon *game.Daemon) string {
 	if daemon == nil {
 		return side + " Daemon"
 	}
 	return side + " " + daemon.Name
+}
+
+func buildNodeMapView(run *game.RunState, selectable map[string]struct{}) *NodeMapView {
+	depths := map[string]int{"start": 0}
+	parents := map[string][]string{}
+	for _, nodeID := range run.NodeOrder {
+		node := run.Nodes[nodeID]
+		if node == nil {
+			continue
+		}
+		if nodeID == "n1" || nodeID == "n2" {
+			parents[nodeID] = append(parents[nodeID], "start")
+		}
+		for _, child := range node.Children {
+			parents[child] = append(parents[child], nodeID)
+		}
+	}
+
+	var resolveDepth func(string) int
+	resolveDepth = func(nodeID string) int {
+		if depth, ok := depths[nodeID]; ok {
+			return depth
+		}
+		best := 0
+		for _, parentID := range parents[nodeID] {
+			best = max(best, resolveDepth(parentID)+1)
+		}
+		depths[nodeID] = best
+		return best
+	}
+
+	grouped := map[int][]string{}
+	for _, nodeID := range run.NodeOrder {
+		depth := resolveDepth(nodeID)
+		grouped[depth] = append(grouped[depth], nodeID)
+	}
+
+	lanes := map[string]int{"start": 1}
+	for depth, ids := range grouped {
+		if depth == 0 {
+			continue
+		}
+		switch len(ids) {
+		case 1:
+			lanes[ids[0]] = 1
+		default:
+			lanes[ids[0]] = 0
+			if len(ids) > 1 {
+				lanes[ids[1]] = 2
+			}
+		}
+	}
+
+	nodes := []NodeMapNode{{
+		ID:      "start",
+		Label:   "Entry Point",
+		Type:    "Start",
+		Depth:   0,
+		Lane:    1,
+		Visible: true,
+		Current: run.PositionNodeID == "start",
+	}}
+
+	edges := []NodeMapEdge{}
+	for _, nodeID := range run.NodeOrder {
+		node := run.Nodes[nodeID]
+		if node == nil {
+			continue
+		}
+		nodes = append(nodes, NodeMapNode{
+			ID:         node.ID,
+			Label:      node.Label,
+			Type:       string(node.Type),
+			Depth:      depths[node.ID],
+			Lane:       lanes[node.ID],
+			Visible:    node.Visible,
+			Resolved:   node.Resolved,
+			Failed:     node.Failed,
+			Selectable: containsChoice(selectable, node.ID),
+			Current:    run.PositionNodeID == node.ID,
+		})
+		if node.ID == "n1" || node.ID == "n2" {
+			edges = append(edges, NodeMapEdge{From: "start", To: node.ID})
+		}
+		for _, child := range node.Children {
+			edges = append(edges, NodeMapEdge{From: node.ID, To: child})
+		}
+	}
+
+	return &NodeMapView{
+		CurrentNodeID: run.PositionNodeID,
+		Nodes:         nodes,
+		Edges:         edges,
+	}
+}
+
+func containsChoice(selectable map[string]struct{}, nodeID string) bool {
+	_, ok := selectable[nodeID]
+	return ok
 }

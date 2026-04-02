@@ -200,7 +200,6 @@ func (e *Engine) ChooseNode(nodeID string) ([]string, error) {
 		fmt.Sprintf("Entered %s.", node.Label),
 		fmt.Sprintf("Encountered %s.", enemy.Name),
 	)
-	lines = append(lines, e.advanceEnemyTurns()...)
 	e.setCombatLog(lines)
 	return lines, nil
 }
@@ -237,7 +236,20 @@ func (e *Engine) UseAbility(slot int) ([]string, error) {
 
 	ability := player.Abilities[slot]
 	lines := e.resolveAbility(ActorPlayer, ability)
-	lines = append(lines, e.advanceEnemyTurns()...)
+	e.setCombatLog(lines)
+	return lines, nil
+}
+
+func (e *Engine) AdvanceEnemyTurn() ([]string, error) {
+	if e.Run.Phase != PhaseCombat {
+		return nil, fmt.Errorf("combat is not active")
+	}
+	if e.isPlayerTurn() {
+		return nil, fmt.Errorf("it is the player's turn")
+	}
+
+	ability := e.pickEnemyAbility()
+	lines := e.resolveAbility(ActorEnemy, ability)
 	e.setCombatLog(lines)
 	return lines, nil
 }
@@ -271,7 +283,6 @@ func (e *Engine) AttemptCapture() ([]string, error) {
 
 	e.consumeTurn()
 	lines = append(lines, e.postTurnResolution(ActorPlayer)...)
-	lines = append(lines, e.advanceEnemyTurns()...)
 	e.setCombatLog(lines)
 	return lines, nil
 }
@@ -361,9 +372,9 @@ func (e *Engine) captureChance() (int, bool) {
 		return 0, false
 	}
 
-	chance := 40
+	chance := 50
 	if ratio <= 0.25 {
-		chance = 75
+		chance = 80
 	}
 
 	for statusID := range enemy.Statuses {
@@ -377,7 +388,7 @@ func (e *Engine) captureChance() (int, bool) {
 		}
 	}
 
-	resistance := max(0, enemy.Stability/4-2)
+	resistance := max(0, enemy.Stability/5-1)
 	chance -= resistance
 	return clamp(chance, 5, 95), true
 }
@@ -392,7 +403,7 @@ func (e *Engine) buildGraph() {
 		names[i], names[j] = names[j], names[i]
 	})
 
-	total := 3 + e.rng.Intn(3)
+	total := 4 + e.rng.Intn(2)
 	makeNode := func(id, label string, nodeType NodeType, difficulty int, children ...string) {
 		e.Run.Nodes[id] = &Node{
 			ID:         id,
@@ -405,21 +416,17 @@ func (e *Engine) buildGraph() {
 	}
 
 	switch total {
-	case 3:
-		makeNode("n1", names[0], randomNodeType(e.rng), 1+e.rng.Intn(2), "boss")
-		makeNode("n2", names[1], randomNodeType(e.rng), 1+e.rng.Intn(2), "boss")
-		makeNode("boss", names[2], NodeBoss, 3, nil...)
 	case 4:
-		makeNode("n1", names[0], randomNodeType(e.rng), 1+e.rng.Intn(2), "n3")
-		makeNode("n2", names[1], randomNodeType(e.rng), 1+e.rng.Intn(2), "n3")
-		makeNode("n3", names[2], randomNodeType(e.rng), 2+e.rng.Intn(2), "boss")
-		makeNode("boss", names[3], NodeBoss, 4, nil...)
+		makeNode("n1", names[0], randomNodeType(e.rng), 1, "n3")
+		makeNode("n2", names[1], randomNodeType(e.rng), 1, "n3")
+		makeNode("n3", names[2], randomNodeType(e.rng), 2, "boss")
+		makeNode("boss", names[3], NodeBoss, 3, nil...)
 	default:
-		makeNode("n1", names[0], randomNodeType(e.rng), 1+e.rng.Intn(2), "n3")
-		makeNode("n2", names[1], randomNodeType(e.rng), 1+e.rng.Intn(2), "n4")
-		makeNode("n3", names[2], randomNodeType(e.rng), 2+e.rng.Intn(2), "boss")
-		makeNode("n4", names[3], randomNodeType(e.rng), 2+e.rng.Intn(2), "boss")
-		makeNode("boss", names[4], NodeBoss, 4, nil...)
+		makeNode("n1", names[0], randomNodeType(e.rng), 1, "n3")
+		makeNode("n2", names[1], randomNodeType(e.rng), 1, "n4")
+		makeNode("n3", names[2], randomNodeType(e.rng), 2, "boss")
+		makeNode("n4", names[3], randomNodeType(e.rng), 2, "boss")
+		makeNode("boss", names[4], NodeBoss, 3, nil...)
 	}
 }
 
@@ -481,8 +488,8 @@ func (e *Engine) currentChoicesForNodesFrom(parentID string) []string {
 
 func (e *Engine) generateEnemyForNode(node *Node) Daemon {
 	bonus := Stats{
-		Integrity: 3 * node.Difficulty,
-		Speed:     node.Difficulty,
+		Integrity: 2 * node.Difficulty,
+		Speed:     0,
 		Stability: node.Difficulty,
 	}
 
@@ -501,7 +508,7 @@ func (e *Engine) generateEnemyForNode(node *Node) Daemon {
 	}
 	slices.Sort(archetypeIDs)
 	archetypeID := archetypeIDs[e.rng.Intn(len(archetypeIDs))]
-	enemy := e.generateDaemon(archetypeID, node.Difficulty, false, "", bonus)
+	enemy := e.generateDaemonWithModifierPool(archetypeID, node.Difficulty, false, "", bonus, e.enemyModifierPool(node.Difficulty))
 	if node.Type == NodeCorrupted {
 		enemy.Statuses["corrupted"] = 2
 	}
@@ -509,6 +516,10 @@ func (e *Engine) generateEnemyForNode(node *Node) Daemon {
 }
 
 func (e *Engine) generateDaemon(archetypeID string, difficulty int, starter bool, forceModifier string, bonus Stats) Daemon {
+	return e.generateDaemonWithModifierPool(archetypeID, difficulty, starter, forceModifier, bonus, nil)
+}
+
+func (e *Engine) generateDaemonWithModifierPool(archetypeID string, difficulty int, starter bool, forceModifier string, bonus Stats, allowedModifiers []string) Daemon {
 	def := e.Content.Archetypes[archetypeID]
 
 	integrity := def.Base.Integrity + bonus.Integrity + e.rng.Intn(5) - 2
@@ -535,7 +546,9 @@ func (e *Engine) generateDaemon(archetypeID string, difficulty int, starter bool
 	trait := e.Content.Traits[traitID]
 
 	modifierPool := []string{"single"}
-	if starter {
+	if len(allowedModifiers) > 0 {
+		modifierPool = append([]string(nil), allowedModifiers...)
+	} else if starter {
 		modifierPool = append([]string(nil), e.Meta.UnlockedModifiers...)
 		if len(modifierPool) == 0 {
 			modifierPool = []string{"single"}
@@ -576,6 +589,21 @@ func (e *Engine) generateDaemon(archetypeID string, difficulty int, starter bool
 	}
 	e.nextDaemonID++
 	return daemon
+}
+
+func (e *Engine) enemyModifierPool(difficulty int) []string {
+	if difficulty <= 2 {
+		return []string{"single"}
+	}
+
+	pool := []string{"single"}
+	for id := range e.Content.Modifiers {
+		if id == "unstable" {
+			continue
+		}
+		pool = append(pool, id)
+	}
+	return uniqueStrings(pool)
 }
 
 func (e *Engine) resolveAbility(actor Actor, ability Ability) []string {
@@ -798,6 +826,9 @@ func (e *Engine) finishCombatWin(captured bool, capturedDaemon *Daemon, lines []
 			e.Content.Archetypes[active.ArchetypeID].Growth.Speed,
 			e.Content.Archetypes[active.ArchetypeID].Growth.Stability,
 		))
+		if restored := e.restoreVictoryIntegrity(active); restored > 0 {
+			lines = append(lines, fmt.Sprintf("%s restored %d Integrity after the encounter.", active.Name, restored))
+		}
 	}
 
 	if captured && capturedDaemon != nil {
@@ -832,6 +863,17 @@ func (e *Engine) applyGrowth(daemon *Daemon) {
 	daemon.Integrity = min(daemon.MaxIntegrity, daemon.Integrity+growth.Integrity)
 	daemon.Speed += growth.Speed
 	daemon.Stability += growth.Stability
+}
+
+func (e *Engine) restoreVictoryIntegrity(daemon *Daemon) int {
+	if daemon == nil || daemon.MaxIntegrity == 0 {
+		return 0
+	}
+
+	recovery := max(6, int(math.Ceil(float64(daemon.MaxIntegrity)*0.20)))
+	before := daemon.Integrity
+	daemon.Integrity = min(daemon.MaxIntegrity, daemon.Integrity+recovery)
+	return daemon.Integrity - before
 }
 
 func (e *Engine) randomLogLine() string {

@@ -80,7 +80,7 @@ Choose Action:
 
 ### Node Graph
 
-* Small branching graph per run (3–5 nodes total)
+* Small branching graph per run (4–5 nodes total, always 2 non-boss fights before the boss)
 
 ### Node Types
 
