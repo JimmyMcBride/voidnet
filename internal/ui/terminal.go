@@ -45,6 +45,7 @@ type model struct {
 	session             *app.Session
 	audio               audio.Runtime
 	audioCounter        uint64
+	activeLoop          music.LoopID
 	scene               app.Scene
 	selectedIndex       int
 	width               int
@@ -138,7 +139,41 @@ func newModelWithAudio(session *app.Session, audioRuntime audio.Runtime) model {
 	}
 	m.selectedIndex = clampSelection(0, m.scene)
 	m.syncBarWidth()
+	m.switchMusic(m.scene)
 	return m
+}
+
+// musicForScene returns the loop appropriate for the given scene.
+func musicForScene(scene app.Scene) music.LoopID {
+	switch scene.Kind {
+	case "combat", "inspect":
+		return music.LoopBattle
+	case "game_over":
+		if scene.WonRun {
+			return music.LoopVictory
+		}
+		return music.LoopDefeat
+	default:
+		// starter_select, node_select, replace, reward, select_active
+		return music.LoopAmbient
+	}
+}
+
+// switchMusic transitions to the loop appropriate for the given scene, doing
+// nothing if the loop is already active or audio is unavailable.
+func (m *model) switchMusic(scene app.Scene) {
+	if m.audio == nil {
+		return
+	}
+	loop := musicForScene(scene)
+	if loop == m.activeLoop {
+		return
+	}
+	if err := m.audio.StartMusicLoop(loop); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to start music loop %q: %v\n", loop, err)
+		return
+	}
+	m.activeLoop = loop
 }
 
 func (m model) Init() tea.Cmd {
@@ -257,6 +292,7 @@ func (m *model) applyChoice(choiceID string) []tea.Cmd {
 func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events []app.Event, choiceID string) []tea.Cmd {
 	cmds := []tea.Cmd{}
 	m.activeModal = nil
+	m.switchMusic(next)
 
 	switch {
 	case isCombatEntry(previous, next):
@@ -422,6 +458,7 @@ func (m *model) maybeAdvanceEnemy() tea.Cmd {
 }
 
 func (m *model) handleEnemyAdvance(previous app.Scene, next app.Scene, events []app.Event) []tea.Cmd {
+	m.switchMusic(next)
 	if len(events) == 0 {
 		m.scene = next
 		m.selectedIndex = clampSelection(0, m.scene)

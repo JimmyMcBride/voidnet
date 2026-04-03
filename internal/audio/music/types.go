@@ -3,7 +3,11 @@ package music
 type LoopID string
 
 const (
-	LoopBoot LoopID = "boot"
+	LoopBoot    LoopID = "boot"
+	LoopAmbient LoopID = "ambient"
+	LoopBattle  LoopID = "battle"
+	LoopVictory LoopID = "victory"
+	LoopDefeat  LoopID = "defeat"
 )
 
 type Waveform int

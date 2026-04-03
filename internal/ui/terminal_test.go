@@ -9,6 +9,7 @@ import (
 
 	"voidnet/internal/app"
 	"voidnet/internal/audio"
+	"voidnet/internal/audio/music"
 	"voidnet/internal/content"
 	"voidnet/internal/meta"
 )
@@ -25,6 +26,8 @@ func (f *fakeAudioRuntime) Play(event audio.Event, seed int64) {
 	}
 	f.played = append(f.played, event)
 }
+
+func (f *fakeAudioRuntime) StartMusicLoop(loop music.LoopID) error { return nil }
 
 func (f *fakeAudioRuntime) SetMuted(muted bool) {
 	f.muted = muted
