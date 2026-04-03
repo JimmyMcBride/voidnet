@@ -24,6 +24,7 @@ Start Run
 → Battle
 → Capture (optional)
 → Reward (if survive)
+→ Maintenance Console / Node Map
 → Next Node
 → Boss
 → Win or Die → Reset
@@ -37,8 +38,9 @@ Start Run
 
 * No free-text commands
 * Menu-driven selection only
-* Arrow keys + enter (or numeric selection)
+* Arrow keys + enter
 * Always-valid inputs (no user errors possible)
+* Runtime SFX should reinforce key actions and be muteable with `m`
 
 ---
 
@@ -158,7 +160,7 @@ Each = **Effect + Modifier**
 ```text
 1. Select archetype
 2. Assign stat ranges
-3. Generate 2 abilities
+3. Assign fixed core attack + archetype move
 4. Assign 1 trait
 ```
 
@@ -187,8 +189,18 @@ Each = **Effect + Modifier**
 
 * Corrupted → lower success rate
 * Leaking → damage over time
-* Delayed → slower next turn
+* Delayed → skip next turn
 * Stabilized → resist effects
+
+### Between-Fight Management
+
+* Winning a battle grants 1 maintenance charge, capped at 1
+* Maintenance can be opened from the node map at any time before the next node
+* The maintenance screen shows the full roster state
+* Repair Daemon and Fortify Daemon each spend 1 maintenance charge
+* After choosing repair or fortify, the player selects which daemon in the roster receives the effect
+* Rotate Lead is free roster management from the node map
+* Players can move between the node map and maintenance console freely before entering the next node
 
 ---
 

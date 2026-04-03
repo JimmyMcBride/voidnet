@@ -4,7 +4,7 @@
       "id": "nullpointer",
       "name": "NullPointer",
       "role": "offense",
-      "base": { "integrity": 34, "speed": 13, "stability": 6 },
+      "base": { "integrity": 38, "speed": 13, "stability": 8 },
       "growth": { "integrity": 4, "speed": 1, "stability": 0 },
       "effect_pool": ["spike", "corrupt", "delay"],
       "trait_pool": ["volatile", "overclocked", "glitched"]
@@ -13,7 +13,7 @@
       "id": "memoryleaker",
       "name": "MemoryLeaker",
       "role": "dot",
-      "base": { "integrity": 40, "speed": 10, "stability": 8 },
+      "base": { "integrity": 44, "speed": 10, "stability": 9 },
       "growth": { "integrity": 4, "speed": 0, "stability": 1 },
       "effect_pool": ["leak", "corrupt", "patch"],
       "trait_pool": ["persistent", "glitched", "encrypted"]
@@ -31,7 +31,7 @@
       "id": "scheduler",
       "name": "Scheduler",
       "role": "speed",
-      "base": { "integrity": 38, "speed": 15, "stability": 8 },
+      "base": { "integrity": 42, "speed": 15, "stability": 9 },
       "growth": { "integrity": 3, "speed": 2, "stability": 1 },
       "effect_pool": ["delay", "spike", "patch"],
       "trait_pool": ["overclocked", "persistent", "glitched"]
@@ -42,7 +42,7 @@
       "id": "corrupt",
       "name": "Corrupt",
       "kind": "status",
-      "accuracy": 82,
+      "accuracy": 86,
       "power": 0,
       "status": "corrupted",
       "status_duration": 3
@@ -52,7 +52,7 @@
       "name": "Leak",
       "kind": "hybrid",
       "accuracy": 86,
-      "power": 6,
+      "power": 7,
       "status": "leaking",
       "status_duration": 3
     },
@@ -77,10 +77,10 @@
       "id": "delay",
       "name": "Delay",
       "kind": "status",
-      "accuracy": 84,
+      "accuracy": 60,
       "power": 0,
       "status": "delayed",
-      "status_duration": 2
+      "status_duration": 1
     }
   ],
   "modifiers": [
@@ -166,7 +166,7 @@
       "id": "delayed",
       "name": "Delayed",
       "accuracy_delta": 0,
-      "speed_delta": -4,
+      "speed_delta": 0,
       "stability_delta": 0,
       "dot_damage": 0,
       "is_positive": false

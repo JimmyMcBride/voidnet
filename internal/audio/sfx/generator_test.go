@@ -166,3 +166,21 @@ func TestAllPresetsGenerate(t *testing.T) {
 		}
 	}
 }
+
+func TestVictoryPresetsStayDistinct(t *testing.T) {
+	levelClear, err := GenerateParamsForDebug(PresetLevelClear, 42)
+	if err != nil {
+		t.Fatalf("level clear params: %v", err)
+	}
+	runVictory, err := GenerateParamsForDebug(PresetRunVictory, 42)
+	if err != nil {
+		t.Fatalf("run victory params: %v", err)
+	}
+
+	if runVictory.Duration <= levelClear.Duration {
+		t.Fatalf("expected run victory to last longer than level clear, got %f <= %f", runVictory.Duration, levelClear.Duration)
+	}
+	if runVictory.Volume <= levelClear.Volume {
+		t.Fatalf("expected run victory to hit harder than level clear, got %f <= %f", runVictory.Volume, levelClear.Volume)
+	}
+}

@@ -1,6 +1,6 @@
 # Internal Runtime SFX + Music Audio System
 
-Voidnet includes an internal SFX runtime generator under `internal/audio/sfx` and a separate looping music subsystem under `internal/audio/music`.
+Voidnet includes a deterministic SFX generator under `internal/audio/sfx`, a runtime playback layer under `internal/audio`, and a separate looping music subsystem under `internal/audio/music`.
 
 ## SFX runtime vs music runtime
 
@@ -8,14 +8,11 @@ Voidnet includes an internal SFX runtime generator under `internal/audio/sfx` an
 - **Music runtime** (`internal/audio/music`) is a long-lived loop player that renders a procedural pattern once and reuses cached PCM.
 - The split ensures background music does not serialize or starve one-shot SFX activity.
 
-## Why music is not routed through the SFX queue
-
-The one-shot SFX path is intentionally preserved for short, discrete sounds. Looping music is handled in its own runtime/player lifecycle so it can start/stop/mute independently and avoid queue contention with gameplay cues.
-
 ## Structure
 
 - `internal/audio/events.go` — semantic event-level API for gameplay systems.
 - `internal/audio/runtime.go` — top-level audio façade that coordinates global mute and delegates separately to SFX + music runtimes.
+- `internal/audio/runtime.go` — top-level audio façade that coordinates queued one-shot SFX playback, global mute, and the separate music runtime.
 - `internal/audio/sfx/types.go` — waveform, preset, and synthesis params definitions.
 - `internal/audio/sfx/presets.go` — Voidnet gameplay preset families with deterministic seeded variation.
 - `internal/audio/sfx/generator.go` — PCM synthesis pipeline (waveform + envelope + pitch + modulation/effects).
@@ -43,13 +40,58 @@ samples, sampleRate, err := sfx.GeneratePreset(sfx.PresetHackSuccess, seed)
 
 Both return in-memory mono `[]int16` PCM for runtime playback integration.
 
+For live playback inside the game:
+
+```go
+bootLoop := music.LoopBoot
+rt, err := audio.NewRuntime(audio.Options{AutoStart: &bootLoop})
+if err != nil {
+	panic(err)
+}
+defer rt.Close()
+
+rt.Play(audio.EventHackSuccess, seed)
+rt.SetMuted(true)
+```
+
+`NewRuntime()` silently falls back to a no-op runtime when the host audio backend cannot be initialized, so gameplay must not depend on sound being available.
+
+## Runtime behavior
+
+- One-shot SFX playback is queued and serialized for short terminal-native cues.
+- Music loops run through a separate runtime so they do not contend with the SFX queue.
+- Runtime audio is enabled by default when available.
+- The TUI exposes a global `m` mute toggle and shows `audio=on`, `audio=muted`, or `audio=unavailable` in the footer.
+- Gameplay systems should emit semantic events such as `EventScan`, `EventDaemonAppears`, or `EventCrash`; the UI/runtime decides when to actually play them.
+
+## Current semantic events
+
+- `SystemBoot` — app launch and new-run reset
+- `Select` — generic menu confirmation
+- `Scan` — node entry and inspect readouts
+- `HackStart` — player attack windup
+- `HackSuccess` — successful hit
+- `HackFail` — failed hit or failed isolate
+- `DaemonAppears` — encounter reveal
+- `DaemonCaptured` — successful isolate / recruit
+- `CorruptionBurst` — corruption or leaking damage
+- `PatchRestore` — healing or stabilization recovery
+- `Backfire` — modifier self-damage
+- `Crash` — daemon death / collapse
+- `Alert` — hostile opener, boss warning, active-daemon loss
+- `LevelClear` — cleared node with no unlock
+- `Unlock` — reward that unlocks new meta content
+- `GlitchStinger` — delay / glitch disruption
+- `RunVictory` — winning the run
+- `RunDefeat` — losing the run
+
 ## Music loop v1 capabilities
 
 - one built-in procedural loop (`music.LoopBoot`)
 - deterministic offline render to PCM bytes
 - background looping playback path owned by a dedicated music runtime
-- global mute propagation from top-level runtime to both SFX and music
-- safe fallback when audio backend is unavailable (music methods become no-op safe)
+- global mute propagation from the top-level runtime to both SFX and music
+- safe fallback when a host audio backend is unavailable
 
 ## Determinism
 

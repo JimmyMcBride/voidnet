@@ -43,7 +43,7 @@ A terminal-native RPG where the player acts as an **Operator** infiltrating a co
 ## 3. Core Gameplay Loop
 
 ```text
-Scan → Choose Node → Enter → Encounter → Battle → Capture → Reward → Progress
+Scan → Choose Node → Enter → Encounter → Battle → Capture → Reward → Maintenance Console / Node Map → Progress
 ```
 
 Expanded:
@@ -79,7 +79,14 @@ Expanded:
    * Scan upgrades
    * Narrative logs
 
-7. **Progress**
+7. **Maintenance Console**
+
+   * Winning a battle banks 1 maintenance charge (cap 1)
+   * Spend it on repairs or fortification whenever you want before the next node
+   * Choose the maintenance action first, then target any daemon in your roster
+   * Swap between the node map and maintenance console freely
+
+8. **Progress**
 
    * Reach boss → make a **philosophical decision**
 

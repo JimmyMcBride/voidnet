@@ -2,23 +2,12 @@ package audio
 
 import (
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"voidnet/internal/audio/music"
 )
-
-type fakeSFX struct {
-	mutedCalls []bool
-	playCalls  []Event
-	closeErr   error
-}
-
-func (f *fakeSFX) SetMuted(v bool) { f.mutedCalls = append(f.mutedCalls, v) }
-func (f *fakeSFX) Play(e Event) error {
-	f.playCalls = append(f.playCalls, e)
-	return nil
-}
-func (f *fakeSFX) Close() error { return f.closeErr }
 
 type fakeMusic struct {
 	mutedCalls []bool
@@ -26,70 +15,89 @@ type fakeMusic struct {
 	stopCalls  int
 	startErr   error
 	closeErr   error
+	available  bool
 }
 
 func (f *fakeMusic) StartLoop(loop music.LoopID) error {
 	f.startCalls = append(f.startCalls, loop)
 	return f.startErr
 }
-func (f *fakeMusic) StopLoop()       { f.stopCalls++ }
-func (f *fakeMusic) SetMuted(v bool) { f.mutedCalls = append(f.mutedCalls, v) }
-func (f *fakeMusic) Available() bool { return true }
-func (f *fakeMusic) Close() error    { return f.closeErr }
 
-func TestStartMusicLoopDoesNotUseSFXQueue(t *testing.T) {
-	sfx := &fakeSFX{}
-	mr := &fakeMusic{}
-	r, _ := NewRuntime(Options{
-		SFX: sfx,
+func (f *fakeMusic) StopLoop() {
+	f.stopCalls++
+}
+
+func (f *fakeMusic) SetMuted(v bool) {
+	f.mutedCalls = append(f.mutedCalls, v)
+}
+
+func (f *fakeMusic) Available() bool {
+	return f.available
+}
+
+func (f *fakeMusic) Close() error {
+	return f.closeErr
+}
+
+type testBackend struct {
+	mu    sync.Mutex
+	calls int
+	ch    chan struct{}
+}
+
+func (b *testBackend) PlayPCM(samples []int16, sampleRate int) error {
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+	if b.ch != nil {
+		select {
+		case b.ch <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (b *testBackend) Available() bool { return true }
+func (b *testBackend) Close() error    { return nil }
+
+func (b *testBackend) Count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+func TestCombinedRuntimeStartsConfiguredLoop(t *testing.T) {
+	loop := music.LoopBoot
+	mr := &fakeMusic{available: true}
+	rt, err := NewRuntime(Options{
+		SFX:       NewNoopRuntime(),
+		AutoStart: &loop,
 		MusicFactory: func(opts music.Options) (*music.Runtime, error) {
 			return nil, nil
 		},
 	})
-	r.music = mr
-	if err := r.StartMusicLoop(music.LoopBoot); err != nil {
-		t.Fatalf("start music: %v", err)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
 	}
-	if len(sfx.playCalls) != 0 {
-		t.Fatalf("expected no sfx queue usage when starting music")
+
+	combined, ok := rt.(*combinedRuntime)
+	if !ok {
+		t.Fatalf("expected combined runtime")
 	}
-	if len(mr.startCalls) != 1 {
-		t.Fatalf("expected music start call")
+	combined.music = mr
+	if err := combined.music.StartLoop(loop); err != nil {
+		t.Fatalf("start loop: %v", err)
+	}
+	if len(mr.startCalls) != 1 || mr.startCalls[0] != music.LoopBoot {
+		t.Fatalf("expected boot loop start call, got %+v", mr.startCalls)
 	}
 }
 
-func TestSFXStillPlaysWhileMusicActive(t *testing.T) {
-	sfx := &fakeSFX{}
-	mr := &fakeMusic{}
-	r, _ := NewRuntime(Options{SFX: sfx})
-	r.music = mr
-	_ = r.StartMusicLoop(music.LoopBoot)
-	if err := r.PlaySFX(EventSelect); err != nil {
-		t.Fatalf("play sfx: %v", err)
-	}
-	if len(sfx.playCalls) != 1 || sfx.playCalls[0] != EventSelect {
-		t.Fatalf("expected queued sfx play while music active")
-	}
-}
-
-func TestGlobalMutePropagatesToSFXAndMusic(t *testing.T) {
-	sfx := &fakeSFX{}
-	mr := &fakeMusic{}
-	r, _ := NewRuntime(Options{SFX: sfx})
-	r.music = mr
-	r.SetMuted(true)
-	r.SetMuted(false)
-	if len(sfx.mutedCalls) < 2 {
-		t.Fatalf("expected mute calls to sfx")
-	}
-	if len(mr.mutedCalls) != 2 {
-		t.Fatalf("expected mute calls to music")
-	}
-}
-
-func TestNewRuntimePropagatesMusicFactoryError(t *testing.T) {
+func TestCombinedRuntimePropagatesMusicFactoryError(t *testing.T) {
 	want := errors.New("music init failed")
 	_, err := NewRuntime(Options{
+		SFX: NewNoopRuntime(),
 		MusicFactory: func(opts music.Options) (*music.Runtime, error) {
 			return nil, want
 		},
@@ -99,18 +107,67 @@ func TestNewRuntimePropagatesMusicFactoryError(t *testing.T) {
 	}
 }
 
-func TestCloseReturnsMusicAndSFXErrors(t *testing.T) {
-	musicErr := errors.New("music close failed")
-	sfxErr := errors.New("sfx close failed")
-	r := &Runtime{
-		sfx:   &fakeSFX{closeErr: sfxErr},
-		music: &fakeMusic{closeErr: musicErr},
+func TestCombinedRuntimeMutePropagatesToMusicAndSFX(t *testing.T) {
+	backend := &testBackend{}
+	sfxRuntime := newSFXRuntimeWithBackend(func(event Event, seed int64) ([]int16, int, error) {
+		return []int16{1, 2, 3}, 44100, nil
+	}, backend)
+	mr := &fakeMusic{available: true}
+	rt := &combinedRuntime{sfx: sfxRuntime, music: mr}
+
+	rt.SetMuted(true)
+	if !rt.Muted() {
+		t.Fatalf("expected combined runtime to store mute state")
 	}
-	err := r.Close()
-	if !errors.Is(err, musicErr) {
-		t.Fatalf("expected joined music close error, got %v", err)
+	if !sfxRuntime.Muted() {
+		t.Fatalf("expected sfx runtime to receive mute state")
 	}
-	if !errors.Is(err, sfxErr) {
-		t.Fatalf("expected joined sfx close error, got %v", err)
+	if len(mr.mutedCalls) != 1 || !mr.mutedCalls[0] {
+		t.Fatalf("expected music runtime to receive mute state, got %+v", mr.mutedCalls)
+	}
+}
+
+func TestRuntimePlaysQueuedEvent(t *testing.T) {
+	backend := &testBackend{ch: make(chan struct{}, 1)}
+	rt := newSFXRuntimeWithBackend(func(event Event, seed int64) ([]int16, int, error) {
+		return []int16{1, 2, 3}, 44100, nil
+	}, backend)
+	defer rt.Close()
+
+	rt.Play(EventSelect, 1)
+
+	select {
+	case <-backend.ch:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatalf("expected queued event to be played")
+	}
+}
+
+func TestRuntimeMuteSuppressesPlayback(t *testing.T) {
+	backend := &testBackend{ch: make(chan struct{}, 1)}
+	rt := newSFXRuntimeWithBackend(func(event Event, seed int64) ([]int16, int, error) {
+		return []int16{1, 2, 3}, 44100, nil
+	}, backend)
+	defer rt.Close()
+
+	rt.SetMuted(true)
+	rt.Play(EventSelect, 1)
+
+	select {
+	case <-backend.ch:
+		t.Fatalf("expected muted runtime to suppress playback")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestNoopRuntimeIsUnavailableAndSafe(t *testing.T) {
+	rt := NewNoopRuntime()
+	if rt.Available() {
+		t.Fatalf("expected noop runtime to report unavailable")
+	}
+	rt.SetMuted(true)
+	rt.Play(EventSelect, 1)
+	if !rt.Muted() {
+		t.Fatalf("expected noop runtime mute state to persist")
 	}
 }
