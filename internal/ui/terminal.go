@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"voidnet/internal/app"
+	"voidnet/internal/audio"
+	"voidnet/internal/audio/music"
 )
 
 const (
@@ -77,14 +80,25 @@ type playbackBeat struct {
 
 type playbackTickMsg struct{}
 
-func Run(session *app.Session) error {
+func Run(session *app.Session) (err error) {
+	bootLoop := music.LoopBoot
+	audioRuntime, err := audio.NewRuntime(audio.Options{AutoStart: &bootLoop})
+	if err != nil {
+		return err
+	}
+	if audioRuntime != nil {
+		defer func() {
+			err = errors.Join(err, audioRuntime.Close())
+		}()
+	}
+
 	m := newModel(session)
 	program := tea.NewProgram(
 		m,
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
 	)
-	_, err := program.Run()
+	_, err = program.Run()
 	return err
 }
 
