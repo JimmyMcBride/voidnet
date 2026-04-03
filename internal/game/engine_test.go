@@ -434,6 +434,72 @@ func TestDelayedSkipsNextTurnOnce(t *testing.T) {
 	}
 }
 
+func TestLeakingTicksOnlyAtEndOfAffectedDaemonTurn(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 71, true)
+	engine.Run.Roster = []Daemon{{
+		ID:           "player",
+		Name:         "Firewall",
+		ArchetypeID:  "firewall",
+		MaxIntegrity: 50,
+		Integrity:    50,
+		Speed:        12,
+		Stability:    12,
+		TraitID:      "encrypted",
+		Abilities: []Ability{
+			{EffectID: "spike", ModifierID: "single"},
+			{EffectID: "patch", ModifierID: "single"},
+		},
+		Statuses: map[string]int{},
+	}}
+	engine.Run.ActiveIndex = 0
+	engine.Run.Combat = &CombatState{
+		NodeID:   "n1",
+		NodeType: NodeStandard,
+		Enemy: Daemon{
+			ID:           "enemy",
+			Name:         "MemoryLeaker",
+			ArchetypeID:  "memoryleaker",
+			MaxIntegrity: 44,
+			Integrity:    44,
+			Speed:        10,
+			Stability:    9,
+			TraitID:      "persistent",
+			Abilities: []Ability{
+				{EffectID: "spike", ModifierID: "single"},
+				{EffectID: "leak", ModifierID: "single"},
+			},
+			Statuses: map[string]int{},
+		},
+		Queue: []Actor{ActorPlayer, ActorEnemy},
+		Round: 1,
+	}
+	engine.Run.Phase = PhaseCombat
+
+	engine.Run.Combat.Enemy.Statuses["leaking"] = 2
+
+	playerLines := engine.resolveAbility(ActorPlayer, Ability{EffectID: "spike", ModifierID: "single"})
+	if strings.Contains(strings.Join(playerLines, "\n"), "Enemy MemoryLeaker suffered 3 damage from Leaking.") {
+		t.Fatalf("expected enemy leaking to wait until enemy turn end, got %+v", playerLines)
+	}
+	if engine.Run.Combat.Enemy.Integrity != 35 {
+		t.Fatalf("expected only direct spike damage on player turn, got %d", engine.Run.Combat.Enemy.Integrity)
+	}
+
+	engine.Run.Combat.Queue = []Actor{ActorEnemy}
+	enemyLines := engine.resolveAbility(ActorEnemy, Ability{EffectID: "spike", ModifierID: "single"})
+	if !strings.Contains(strings.Join(enemyLines, "\n"), "Enemy MemoryLeaker suffered 3 damage from Leaking.") {
+		t.Fatalf("expected enemy leaking to tick at end of enemy turn, got %+v", enemyLines)
+	}
+	if engine.Run.Combat.Enemy.Integrity != 32 {
+		t.Fatalf("expected leaking damage to land on enemy turn end, got %d", engine.Run.Combat.Enemy.Integrity)
+	}
+}
+
 func TestContinueRoutesThroughMaintenance(t *testing.T) {
 	reg, err := content.Load()
 	if err != nil {

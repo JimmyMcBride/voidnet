@@ -370,6 +370,12 @@ func TestMaintenanceSceneAndRotateSelectionState(t *testing.T) {
 	if len(scene.Choices) < 3 || scene.Choices[2].Enabled {
 		t.Fatalf("expected rotate to be disabled without a reserve daemon, got %+v", scene.Choices)
 	}
+	if scene.Choices[0].Details == nil || !strings.Contains(scene.Choices[0].Details.Preview, "30%") {
+		t.Fatalf("expected maintenance repair choice to include details, got %+v", scene.Choices[0])
+	}
+	if scene.Choices[2].Details == nil || !strings.Contains(scene.Choices[2].Details.Preview, "Unavailable") {
+		t.Fatalf("expected disabled rotate choice to explain why it is unavailable, got %+v", scene.Choices[2])
+	}
 
 	session.engine.Run.Roster = append(session.engine.Run.Roster, game.Daemon{ID: "b", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 42, Speed: 15, Stability: 9, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "single"}}, TraitID: "persistent", Statuses: map[string]int{}})
 	if _, _, err := session.Apply("maintenance:rotate"); err != nil {

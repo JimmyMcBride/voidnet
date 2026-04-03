@@ -83,6 +83,35 @@ func containsAudioEvent(events []audio.Event, target audio.Event) bool {
 	return false
 }
 
+func maintenanceTestScene() app.Scene {
+	return app.Scene{
+		Kind:  "maintenance",
+		Title: "Maintenance",
+		Lines: []string{
+			"Perform one maintenance action before moving deeper into the network.",
+			"Active daemon: Firewall 55/55 INT | SPD 9 | STB 13 | Encrypted",
+		},
+		Choices: []app.Choice{
+			{ID: "maintenance:repair", Label: "Repair Active", Enabled: true, Details: &app.ChoiceDetails{
+				Title:   "Repair Active",
+				Preview: "Restore 30% max Integrity, minimum 10, and cleanse one negative status.",
+				Lines:   []string{"Repair preview"},
+			}},
+			{ID: "maintenance:fortify", Label: "Fortify Link", Enabled: true, Details: &app.ChoiceDetails{
+				Title:   "Fortify Link",
+				Preview: "Restore 10% max Integrity, minimum 4, and grant Stabilized for the next fight.",
+				Lines:   []string{"Fortify preview"},
+			}},
+			{ID: "maintenance:rotate", Label: "Rotate Lead", Enabled: true, Details: &app.ChoiceDetails{
+				Title:   "Rotate Lead",
+				Preview: "Choose a reserve daemon; the new lead restores 20% max Integrity, minimum 6.",
+				Lines:   []string{"Rotate preview"},
+			}},
+			{ID: "quit", Label: "Quit", Enabled: true},
+		},
+	}
+}
+
 func TestApplyChoiceResetsSelectionToFirstOption(t *testing.T) {
 	reg, err := content.Load()
 	if err != nil {
@@ -470,6 +499,32 @@ func TestCombatMenuShowsSelectedChoicePreview(t *testing.T) {
 	}
 }
 
+func TestMaintenanceMenuShowsSelectedChoicePreview(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
+
+	m := newModel(session)
+	m.width = 100
+	m.height = 36
+	m.scene = maintenanceTestScene()
+
+	view := m.render()
+	if !strings.Contains(view, "Preview:") {
+		t.Fatalf("expected maintenance command deck to show a preview block, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Restore 30% max Integrity, minimum 10, and cleanse one negative status.") {
+		t.Fatalf("expected maintenance preview text, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Press i for full command detail.") {
+		t.Fatalf("expected maintenance detail hint, got:\n%s", view)
+	}
+}
+
 func TestSpaceNoLongerSelectsMenusAndEnterStillDoes(t *testing.T) {
 	reg, err := content.Load()
 	if err != nil {
@@ -662,6 +717,12 @@ func TestControlsHintReflectsSpacePlaybackAndEnterSelect(t *testing.T) {
 	settleCombatPlayback(&combatModel)
 	if hint := combatModel.controlsHint(); !strings.Contains(hint, "enter select") || strings.Contains(hint, "space select") {
 		t.Fatalf("expected combat hint to advertise enter-only selection, got %q", hint)
+	}
+
+	maintenanceModel := newModel(session)
+	maintenanceModel.scene = maintenanceTestScene()
+	if hint := maintenanceModel.controlsHint(); !strings.Contains(hint, "i detail") {
+		t.Fatalf("expected maintenance hint to advertise detail access, got %q", hint)
 	}
 }
 

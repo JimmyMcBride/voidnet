@@ -276,9 +276,9 @@ func (s *Session) Snapshot() Scene {
 			fmt.Sprintf("Active daemon: %s", daemonSummary(active.Name, active, s.registry)),
 		}
 		choices := []Choice{
-			{ID: "maintenance:repair", Label: "Repair Active", Enabled: true},
-			{ID: "maintenance:fortify", Label: "Fortify Link", Enabled: true},
-			{ID: "maintenance:rotate", Label: "Rotate Lead", Enabled: len(run.Roster) > 1},
+			{ID: "maintenance:repair", Label: "Repair Active", Enabled: true, Details: maintenanceRepairDetails()},
+			{ID: "maintenance:fortify", Label: "Fortify Link", Enabled: true, Details: maintenanceFortifyDetails()},
+			{ID: "maintenance:rotate", Label: "Rotate Lead", Enabled: len(run.Roster) > 1, Details: maintenanceRotateDetails(len(run.Roster) > 1)},
 			{ID: "quit", Label: "Quit", Enabled: true},
 		}
 		if len(run.Roster) <= 1 {
@@ -589,6 +589,56 @@ func inspectDetails() *ChoiceDetails {
 			"Does not spend a combat turn.",
 			"Use Back to return to combat.",
 		},
+	}
+}
+
+func maintenanceRepairDetails() *ChoiceDetails {
+	return &ChoiceDetails{
+		Title:   "Repair Active",
+		Preview: "Restore 30% max Integrity, minimum 10, and cleanse one negative status.",
+		Lines: []string{
+			"Perform a focused repair cycle on the active daemon.",
+			"",
+			"Restore: 30% of max Integrity.",
+			"Minimum restore: 10.",
+			"Also clears one negative status if present.",
+			"Best when the current lead is damaged or corrupted.",
+		},
+	}
+}
+
+func maintenanceFortifyDetails() *ChoiceDetails {
+	return &ChoiceDetails{
+		Title:   "Fortify Link",
+		Preview: "Restore 10% max Integrity, minimum 4, and grant Stabilized for the next fight.",
+		Lines: []string{
+			"Light recovery plus a defensive hardening pass.",
+			"",
+			"Restore: 10% of max Integrity.",
+			"Minimum restore: 4.",
+			"Grants Stabilized(2).",
+			"Best when the current lead is healthy enough and you want safer setup in the next node.",
+		},
+	}
+}
+
+func maintenanceRotateDetails(enabled bool) *ChoiceDetails {
+	lines := []string{
+		"Hand the lead slot to a reserve daemon.",
+		"",
+		"After selection: the new active daemon restores 20% of max Integrity.",
+		"Minimum restore: 6.",
+		"Best when you want to preserve the current lead or pivot into a better matchup.",
+	}
+	preview := "Choose a reserve daemon; the new lead restores 20% max Integrity, minimum 6."
+	if !enabled {
+		lines = append(lines, "", "Unavailable: you do not have a reserve daemon yet.")
+		preview = "Unavailable until you have at least one reserve daemon."
+	}
+	return &ChoiceDetails{
+		Title:   "Rotate Lead",
+		Preview: preview,
+		Lines:   lines,
 	}
 }
 

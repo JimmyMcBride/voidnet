@@ -565,7 +565,7 @@ func (m model) render() string {
 		sections = append(sections, m.renderNodeSelect(width))
 	default:
 		sections = append(sections, panel(sceneHeader(m.scene), decorateLines(m.scene), width))
-		sections = append(sections, renderMenu(enabledChoices(m.scene), m.selectedIndex, width, m.playback != nil))
+		sections = append(sections, m.renderSceneMenu(width))
 	}
 
 	sections = append(sections, centerLine(colorize(ansiDim, m.controlsHint()), width+4))
@@ -1582,11 +1582,26 @@ func (m model) controlsHint() string {
 	if m.scene.Combat != nil {
 		return fmt.Sprintf("controls: j/k menu | i detail | gg/G/ctrl+u/ctrl+d log | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
 	}
+	if m.selectedChoiceDetails() != nil {
+		return fmt.Sprintf("controls: up/down or j/k | i detail | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
+	}
 	return fmt.Sprintf("controls: up/down or j/k | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
 }
 
 func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool) string {
 	return panel("COMMAND DECK", renderMenuLines(choices, selectedIndex, locked), width)
+}
+
+func (m model) renderSceneMenu(width int) string {
+	lines := renderMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+	detail := m.selectedChoiceDetails()
+	if detail != nil && m.playback == nil {
+		lines = append(lines, "")
+		lines = append(lines, colorize(ansiCyan, "Preview:"))
+		lines = append(lines, detail.Preview)
+		lines = append(lines, colorize(ansiDim, "Press i for full command detail."))
+	}
+	return panel("COMMAND DECK", lines, width)
 }
 
 func (m model) renderCombatMenuLines() []string {

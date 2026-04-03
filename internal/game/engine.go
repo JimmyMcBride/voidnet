@@ -899,15 +899,7 @@ func (e *Engine) pickEnemyAbility() Ability {
 
 func (e *Engine) postTurnResolution(actor Actor) []string {
 	lines := []string{}
-	if actor == ActorPlayer {
-		lines = append(lines, e.tickStatuses(e.activeDaemon(), e.combatantLabel(ActorPlayer, e.activeDaemon()))...)
-		if e.activeDaemon() != nil {
-			lines = append(lines, e.tickStatuses(&e.Run.Combat.Enemy, e.combatantLabel(ActorEnemy, &e.Run.Combat.Enemy))...)
-		}
-	} else {
-		lines = append(lines, e.tickStatuses(&e.Run.Combat.Enemy, e.combatantLabel(ActorEnemy, &e.Run.Combat.Enemy))...)
-		lines = append(lines, e.tickStatuses(e.activeDaemon(), e.combatantLabel(ActorPlayer, e.activeDaemon()))...)
-	}
+	lines = append(lines, e.tickStatuses(e.combatantForActor(actor), e.combatantLabel(actor, e.combatantForActor(actor)))...)
 
 	player := e.activeDaemon()
 	enemy := &e.Run.Combat.Enemy
