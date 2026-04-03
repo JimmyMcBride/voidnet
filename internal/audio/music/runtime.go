@@ -1,6 +1,9 @@
 package music
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 type player interface {
 	StartLoopPCM(pcm []byte) error
@@ -32,6 +35,12 @@ func NewRuntime(opts Options) (*Runtime, error) {
 	}
 	p, err := factory()
 	if err != nil {
+		if errors.Is(err, errAudioUnavailable) {
+			return r, nil
+		}
+		return nil, err
+	}
+	if p == nil {
 		return r, nil
 	}
 	r.player = p
@@ -74,22 +83,27 @@ func (r *Runtime) SetMuted(muted bool) {
 	if r.muted == muted {
 		return
 	}
-	r.muted = muted
 	if !r.available || r.player == nil {
+		r.muted = muted
 		return
 	}
 	if muted {
+		r.muted = true
 		_ = r.player.Stop()
 		return
 	}
 	if r.active == "" {
+		r.muted = false
 		return
 	}
 	pcm, err := r.cache.Get(r.active)
 	if err != nil {
 		return
 	}
-	_ = r.player.StartLoopPCM(pcm)
+	if err := r.player.StartLoopPCM(pcm); err != nil {
+		return
+	}
+	r.muted = false
 }
 
 func (r *Runtime) Available() bool {
@@ -101,13 +115,13 @@ func (r *Runtime) Available() bool {
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.available = false
 	if r.player == nil {
 		return nil
 	}
 	_ = r.player.Stop()
 	err := r.player.Close()
 	r.player = nil
-	r.available = false
 	return err
 }
 

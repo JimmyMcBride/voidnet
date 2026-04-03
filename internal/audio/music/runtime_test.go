@@ -1,18 +1,22 @@
 package music
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 type fakePlayer struct {
 	startCalls int
 	stopCalls  int
 	closeCalls int
 	lastPCM    []byte
+	startErr   error
 }
 
 func (f *fakePlayer) StartLoopPCM(pcm []byte) error {
 	f.startCalls++
 	f.lastPCM = append([]byte(nil), pcm...)
-	return nil
+	return f.startErr
 }
 func (f *fakePlayer) Stop() error {
 	f.stopCalls++
@@ -30,6 +34,24 @@ func TestRuntimeUnavailableWhenFactoryFails(t *testing.T) {
 	}
 	if r.Available() {
 		t.Fatalf("expected unavailable runtime")
+	}
+}
+
+func TestRuntimePropagatesUnexpectedFactoryError(t *testing.T) {
+	want := errors.New("backend init failed")
+	_, err := NewRuntime(Options{Factory: func() (player, error) { return nil, want }})
+	if !errors.Is(err, want) {
+		t.Fatalf("expected factory error, got %v", err)
+	}
+}
+
+func TestRuntimeUnavailableWhenFactoryReturnsNilPlayer(t *testing.T) {
+	r, err := NewRuntime(Options{Factory: func() (player, error) { return nil, nil }})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	if r.Available() {
+		t.Fatalf("expected unavailable runtime for nil player")
 	}
 }
 
@@ -73,5 +95,42 @@ func TestRestartLoopSwapsActiveLoopCleanly(t *testing.T) {
 	}
 	if p.startCalls != 2 {
 		t.Fatalf("expected two starts, got %d", p.startCalls)
+	}
+}
+
+func TestSetMutedKeepsRuntimeMutedWhenResumeFails(t *testing.T) {
+	p := &fakePlayer{}
+	r, _ := NewRuntime(Options{Factory: func() (player, error) { return p, nil }})
+	if err := r.StartLoop(LoopBoot); err != nil {
+		t.Fatalf("start loop: %v", err)
+	}
+
+	r.SetMuted(true)
+	p.startErr = errors.New("resume failed")
+	r.SetMuted(false)
+	if !r.muted {
+		t.Fatalf("expected runtime to stay muted after failed resume")
+	}
+	if p.startCalls != 2 {
+		t.Fatalf("expected one initial start and one failed resume attempt, got %d", p.startCalls)
+	}
+
+	p.startErr = nil
+	r.SetMuted(false)
+	if r.muted {
+		t.Fatalf("expected runtime to unmute after successful retry")
+	}
+	if p.startCalls != 3 {
+		t.Fatalf("expected retry to start playback, got %d starts", p.startCalls)
+	}
+}
+
+func TestCloseMarksUnavailableWithoutPlayer(t *testing.T) {
+	r := &Runtime{available: true, cache: NewCache()}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+	if r.Available() {
+		t.Fatalf("expected close to mark runtime unavailable")
 	}
 }

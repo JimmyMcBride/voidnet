@@ -1,6 +1,10 @@
 package audio
 
-import "voidnet/internal/audio/music"
+import (
+	"errors"
+
+	"voidnet/internal/audio/music"
+)
 
 type sfxRuntime interface {
 	SetMuted(bool)
@@ -39,12 +43,17 @@ func NewRuntime(opts Options) (*Runtime, error) {
 	if factory == nil {
 		factory = music.NewRuntime
 	}
-	mr, _ := factory(music.Options{Muted: opts.Muted})
+	mr, err := factory(music.Options{Muted: opts.Muted})
+	if err != nil {
+		return nil, err
+	}
 	if mr != nil {
-		r.music = mr
 		if opts.AutoStart != nil {
-			_ = r.music.StartLoop(*opts.AutoStart)
+			if err := mr.StartLoop(*opts.AutoStart); err != nil {
+				return nil, errors.Join(err, mr.Close())
+			}
 		}
+		r.music = mr
 	}
 	return r, nil
 }
@@ -91,11 +100,12 @@ func (r *Runtime) MusicAvailable() bool {
 }
 
 func (r *Runtime) Close() error {
+	var err error
 	if r.music != nil {
-		_ = r.music.Close()
+		err = errors.Join(err, r.music.Close())
 	}
 	if r.sfx != nil {
-		return r.sfx.Close()
+		err = errors.Join(err, r.sfx.Close())
 	}
-	return nil
+	return err
 }

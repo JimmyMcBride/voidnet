@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -79,11 +80,16 @@ type playbackBeat struct {
 
 type playbackTickMsg struct{}
 
-func Run(session *app.Session) error {
-	audioRuntime, _ := audio.NewRuntime(audio.Options{})
+func Run(session *app.Session) (err error) {
+	bootLoop := music.LoopBoot
+	audioRuntime, err := audio.NewRuntime(audio.Options{AutoStart: &bootLoop})
+	if err != nil {
+		return err
+	}
 	if audioRuntime != nil {
-		_ = audioRuntime.StartMusicLoop(music.LoopBoot)
-		defer audioRuntime.Close()
+		defer func() {
+			err = errors.Join(err, audioRuntime.Close())
+		}()
 	}
 
 	m := newModel(session)
@@ -92,7 +98,7 @@ func Run(session *app.Session) error {
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
 	)
-	_, err := program.Run()
+	_, err = program.Run()
 	return err
 }
 
