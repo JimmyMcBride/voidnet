@@ -36,6 +36,7 @@ type Scene struct {
 	Choices []Choice
 	Combat  *CombatView
 	NodeMap *NodeMapView
+	WonRun  bool // set when Kind == "game_over" and the player won
 }
 
 type CombatView struct {
@@ -294,7 +295,7 @@ func (s *Session) Snapshot() Scene {
 			{ID: "continue", Label: "New Run", Enabled: true},
 			{ID: "quit", Label: "Quit", Enabled: true},
 		}
-		return Scene{Kind: string(run.Phase), Title: "Run Summary", Lines: lines, Choices: choices}
+		return Scene{Kind: string(run.Phase), Title: "Run Summary", Lines: lines, Choices: choices, WonRun: run.Won}
 	}
 
 	return Scene{

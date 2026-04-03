@@ -60,6 +60,8 @@ type model struct {
 	combatLogAutoFollow bool
 	combatLogGPrefix    bool
 	activeModal         *app.ChoiceDetails
+	audio               *audio.Runtime
+	activeLoop          music.LoopID
 }
 
 type playbackSequence struct {
@@ -92,7 +94,7 @@ func Run(session *app.Session) (err error) {
 		}()
 	}
 
-	m := newModel(session)
+	m := newModel(session, audioRuntime)
 	program := tea.NewProgram(
 		m,
 		tea.WithInput(os.Stdin),
@@ -102,7 +104,7 @@ func Run(session *app.Session) (err error) {
 	return err
 }
 
-func newModel(session *app.Session) model {
+func newModel(session *app.Session, audioRuntime *audio.Runtime) model {
 	playerBar := progress.New(
 		progress.WithFillCharacters('=', '-'),
 		progress.WithSpringOptions(18, 0.92),
@@ -125,10 +127,42 @@ func newModel(session *app.Session) model {
 		playerBar:           playerBar,
 		enemyBar:            enemyBar,
 		combatLogAutoFollow: true,
+		audio:               audioRuntime,
 	}
 	m.selectedIndex = clampSelection(0, m.scene)
 	m.syncBarWidth()
+	m.switchMusic(m.scene)
 	return m
+}
+
+// musicForScene returns the loop appropriate for the given scene.
+func musicForScene(scene app.Scene) music.LoopID {
+	switch scene.Kind {
+	case "combat", "inspect":
+		return music.LoopBattle
+	case "game_over":
+		if scene.WonRun {
+			return music.LoopVictory
+		}
+		return music.LoopDefeat
+	default:
+		// starter_select, node_select, replace, reward, select_active
+		return music.LoopAmbient
+	}
+}
+
+// switchMusic transitions to the loop appropriate for the given scene, doing
+// nothing if the loop is already active or audio is unavailable.
+func (m *model) switchMusic(scene app.Scene) {
+	if m.audio == nil {
+		return
+	}
+	loop := musicForScene(scene)
+	if loop == m.activeLoop {
+		return
+	}
+	_ = m.audio.StartMusicLoop(loop)
+	m.activeLoop = loop
 }
 
 func (m model) Init() tea.Cmd {
@@ -243,6 +277,7 @@ func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events
 	lines := eventMessages(events)
 	cmds := []tea.Cmd{}
 	m.activeModal = nil
+	m.switchMusic(next)
 
 	switch {
 	case isCombatEntry(previous, next):
@@ -399,6 +434,7 @@ func (m *model) maybeAdvanceEnemy() tea.Cmd {
 }
 
 func (m *model) handleEnemyAdvance(previous app.Scene, next app.Scene, events []app.Event) []tea.Cmd {
+	m.switchMusic(next)
 	lines := eventMessages(events)
 	if len(lines) == 0 {
 		m.scene = next

@@ -22,7 +22,7 @@ func newCombatTestModel(t *testing.T, seed int64) model {
 
 	state := meta.DefaultState()
 	session := app.NewSession(reg, meta.NewStore(""), state, seed, true)
-	model := newModel(session)
+	model := newModel(session, nil)
 	model.width = 100
 	model.height = 40
 	model.syncBarWidth()
@@ -48,7 +48,7 @@ func TestApplyChoiceResetsSelectionToFirstOption(t *testing.T) {
 
 	state := meta.DefaultState()
 	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
-	model := newModel(session)
+	model := newModel(session, nil)
 	model.selectedIndex = 1
 
 	model.applyChoice("starter:firewall")
@@ -105,7 +105,7 @@ func TestCombatPlaybackDefersEnemyFirstDamageUntilImpactBeat(t *testing.T) {
 
 	state := meta.DefaultState()
 	session := app.NewSession(reg, meta.NewStore(""), state, 2, true)
-	model := newModel(session)
+	model := newModel(session, nil)
 
 	model.applyChoice("starter:firewall")
 	model.applyChoice("node:n1")
@@ -399,7 +399,7 @@ func TestSpaceNoLongerSelectsMenusAndEnterStillDoes(t *testing.T) {
 
 	state := meta.DefaultState()
 	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
-	m := newModel(session)
+	m := newModel(session, nil)
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	afterSpace := updated.(model)
@@ -437,7 +437,7 @@ func TestControlsHintReflectsSpacePlaybackAndEnterSelect(t *testing.T) {
 
 	state := meta.DefaultState()
 	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
-	m := newModel(session)
+	m := newModel(session, nil)
 	if hint := m.controlsHint(); !strings.Contains(hint, "enter select") || strings.Contains(hint, "space select") {
 		t.Fatalf("expected non-combat hint to advertise enter-only selection, got %q", hint)
 	}
