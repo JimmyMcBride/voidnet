@@ -11,6 +11,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"voidnet/internal/app"
+	"voidnet/internal/audio"
+	"voidnet/internal/audio/music"
 )
 
 const (
@@ -78,6 +80,12 @@ type playbackBeat struct {
 type playbackTickMsg struct{}
 
 func Run(session *app.Session) error {
+	audioRuntime, _ := audio.NewRuntime(audio.Options{})
+	if audioRuntime != nil {
+		_ = audioRuntime.StartMusicLoop(music.LoopBoot)
+		defer audioRuntime.Close()
+	}
+
 	m := newModel(session)
 	program := tea.NewProgram(
 		m,
