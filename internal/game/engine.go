@@ -45,6 +45,8 @@ type ActiveSelectionContext string
 const (
 	SelectActiveNone       ActiveSelectionContext = ""
 	SelectActiveAfterLoss  ActiveSelectionContext = "after_loss"
+	SelectActiveRepair     ActiveSelectionContext = "repair_target"
+	SelectActiveFortify    ActiveSelectionContext = "fortify_target"
 	SelectActiveRotateLead ActiveSelectionContext = "rotate_lead"
 )
 
@@ -115,6 +117,7 @@ type RunState struct {
 	Inspecting         bool
 	FirstCombatBoosted bool
 	SelectActiveMode   ActiveSelectionContext
+	MaintenanceCharge  int
 	Won                bool
 	Lost               bool
 }
@@ -379,6 +382,57 @@ func (e *Engine) Continue() ([]string, error) {
 	}
 }
 
+func (e *Engine) OpenMaintenance() ([]string, error) {
+	if e.Run.Phase != PhaseNodeSelect {
+		return nil, fmt.Errorf("maintenance view is unavailable in phase %s", e.Run.Phase)
+	}
+	e.Run.Phase = PhaseMaintenance
+	return nil, nil
+}
+
+func (e *Engine) OpenNodeMap() ([]string, error) {
+	if e.Run.Phase != PhaseMaintenance {
+		return nil, fmt.Errorf("node map is unavailable in phase %s", e.Run.Phase)
+	}
+	e.Run.Phase = PhaseNodeSelect
+	return nil, nil
+}
+
+func (e *Engine) BeginRotateLead() ([]string, error) {
+	if e.Run.Phase != PhaseNodeSelect {
+		return nil, fmt.Errorf("rotate lead is unavailable in phase %s", e.Run.Phase)
+	}
+	if len(e.Run.Roster) <= 1 {
+		return nil, fmt.Errorf("no reserve daemon is available")
+	}
+	e.Run.SelectActiveMode = SelectActiveRotateLead
+	e.Run.Phase = PhaseSelectActive
+	return []string{"Choose a reserve daemon to rotate into the lead."}, nil
+}
+
+func (e *Engine) CancelRotateLead() ([]string, error) {
+	if e.Run.Phase != PhaseSelectActive || e.Run.SelectActiveMode != SelectActiveRotateLead {
+		return nil, fmt.Errorf("rotate lead cancel is unavailable in phase %s", e.Run.Phase)
+	}
+	e.Run.SelectActiveMode = SelectActiveNone
+	e.Run.Phase = PhaseNodeSelect
+	return nil, nil
+}
+
+func (e *Engine) CancelMaintenanceTargeting() ([]string, error) {
+	if e.Run.Phase != PhaseSelectActive {
+		return nil, fmt.Errorf("maintenance target cancel is unavailable in phase %s", e.Run.Phase)
+	}
+	switch e.Run.SelectActiveMode {
+	case SelectActiveRepair, SelectActiveFortify:
+		e.Run.SelectActiveMode = SelectActiveNone
+		e.Run.Phase = PhaseMaintenance
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("maintenance target cancel is unavailable in mode %s", e.Run.SelectActiveMode)
+	}
+}
+
 func (e *Engine) ChooseActive(index int) ([]string, error) {
 	if e.Run.Phase != PhaseSelectActive {
 		return nil, fmt.Errorf("active selection is not active")
@@ -389,13 +443,42 @@ func (e *Engine) ChooseActive(index int) ([]string, error) {
 	if e.Run.SelectActiveMode == SelectActiveRotateLead && index == e.Run.ActiveIndex {
 		return nil, fmt.Errorf("choose a different daemon to rotate into the lead")
 	}
-	e.Run.ActiveIndex = index
-	lines := []string{fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name)}
+	target := &e.Run.Roster[index]
+	lines := []string{}
 	switch e.Run.SelectActiveMode {
 	case SelectActiveAfterLoss:
+		e.Run.ActiveIndex = index
+		lines = append(lines, fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name))
+		e.Run.SelectActiveMode = SelectActiveNone
+		e.Run.Phase = PhaseMaintenance
+	case SelectActiveRepair:
+		if e.Run.MaintenanceCharge <= 0 {
+			return nil, fmt.Errorf("no maintenance charge is available")
+		}
+		if restored := e.restoreIntegrityPercent(target, 0.30, 10); restored > 0 {
+			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", target.Name, restored))
+		}
+		if removed := e.cleanseOneNegative(target); removed != "" {
+			lines = append(lines, fmt.Sprintf("%s cleared %s.", target.Name, e.Content.Statuses[removed].Name))
+		}
+		e.Run.MaintenanceCharge = 0
+		e.Run.SelectActiveMode = SelectActiveNone
+		e.Run.Phase = PhaseMaintenance
+	case SelectActiveFortify:
+		if e.Run.MaintenanceCharge <= 0 {
+			return nil, fmt.Errorf("no maintenance charge is available")
+		}
+		if restored := e.restoreIntegrityPercent(target, 0.10, 4); restored > 0 {
+			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", target.Name, restored))
+		}
+		e.applyStatus(target, "stabilized", 2)
+		lines = append(lines, fmt.Sprintf("%s gained Stabilized.", target.Name))
+		e.Run.MaintenanceCharge = 0
 		e.Run.SelectActiveMode = SelectActiveNone
 		e.Run.Phase = PhaseMaintenance
 	case SelectActiveRotateLead:
+		e.Run.ActiveIndex = index
+		lines = append(lines, fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name))
 		active := e.activeDaemon()
 		if restored := e.restoreIntegrityPercent(active, 0.20, 6); restored > 0 {
 			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", active.Name, restored))
@@ -403,6 +486,8 @@ func (e *Engine) ChooseActive(index int) ([]string, error) {
 		e.Run.SelectActiveMode = SelectActiveNone
 		e.Run.Phase = PhaseNodeSelect
 	default:
+		e.Run.ActiveIndex = index
+		lines = append(lines, fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name))
 		e.Run.Phase = PhaseNodeSelect
 	}
 	return lines, nil
@@ -421,27 +506,19 @@ func (e *Engine) ChooseMaintenance(action string) ([]string, error) {
 	lines := []string{}
 	switch action {
 	case "repair":
-		if restored := e.restoreIntegrityPercent(active, 0.30, 10); restored > 0 {
-			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", active.Name, restored))
+		if e.Run.MaintenanceCharge <= 0 {
+			return nil, fmt.Errorf("no maintenance charge is available")
 		}
-		if removed := e.cleanseOneNegative(active); removed != "" {
-			lines = append(lines, fmt.Sprintf("%s cleared %s.", active.Name, e.Content.Statuses[removed].Name))
-		}
-		e.Run.Phase = PhaseNodeSelect
-	case "fortify":
-		if restored := e.restoreIntegrityPercent(active, 0.10, 4); restored > 0 {
-			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", active.Name, restored))
-		}
-		e.applyStatus(active, "stabilized", 2)
-		lines = append(lines, fmt.Sprintf("%s gained Stabilized.", active.Name))
-		e.Run.Phase = PhaseNodeSelect
-	case "rotate":
-		if len(e.Run.Roster) <= 1 {
-			return nil, fmt.Errorf("no reserve daemon is available")
-		}
-		e.Run.SelectActiveMode = SelectActiveRotateLead
+		e.Run.SelectActiveMode = SelectActiveRepair
 		e.Run.Phase = PhaseSelectActive
-		lines = append(lines, "Choose a reserve daemon to rotate into the lead.")
+		lines = append(lines, "Choose a daemon to repair.")
+	case "fortify":
+		if e.Run.MaintenanceCharge <= 0 {
+			return nil, fmt.Errorf("no maintenance charge is available")
+		}
+		e.Run.SelectActiveMode = SelectActiveFortify
+		e.Run.Phase = PhaseSelectActive
+		lines = append(lines, "Choose a daemon to fortify.")
 	default:
 		return nil, fmt.Errorf("unknown maintenance action %q", action)
 	}
@@ -1007,6 +1084,9 @@ func (e *Engine) finishCombatWin(captured bool, capturedDaemon *Daemon, lines []
 	} else {
 		e.Run.Phase = PhaseReward
 	}
+
+	e.Run.MaintenanceCharge = min(1, e.Run.MaintenanceCharge+1)
+	lines = append(lines, fmt.Sprintf("Maintenance charge ready (%d/1).", e.Run.MaintenanceCharge))
 
 	if node.Type == NodeBoss {
 		e.Run.Won = true

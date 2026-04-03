@@ -529,6 +529,63 @@ func TestContinueRoutesThroughMaintenance(t *testing.T) {
 	}
 }
 
+func TestBattleWinBanksMaintenanceChargeUpToOne(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 60, true)
+	engine.Run.Roster = []Daemon{
+		{ID: "a", Name: "Firewall", ArchetypeID: "firewall", MaxIntegrity: 50, Integrity: 30, Speed: 8, Stability: 12, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{}},
+	}
+	engine.Run.ActiveIndex = 0
+	engine.Run.PositionNodeID = "start"
+	engine.Run.Phase = PhaseNodeSelect
+	node := engine.Run.Nodes["n1"]
+	node.Visible = true
+
+	if _, err := engine.ChooseNode("n1"); err != nil {
+		t.Fatalf("choose node failed: %v", err)
+	}
+	engine.Run.MaintenanceCharge = 0
+	engine.finishCombatWin(false, nil, []string{"Node complete."})
+	if engine.Run.MaintenanceCharge != 1 {
+		t.Fatalf("expected win to bank one maintenance charge, got %d", engine.Run.MaintenanceCharge)
+	}
+	if !strings.Contains(strings.Join(engine.Run.PendingRewardLines, "\n"), "Maintenance charge ready (1/1).") {
+		t.Fatalf("expected maintenance charge log, got %+v", engine.Run.PendingRewardLines)
+	}
+
+	engine.Run.MaintenanceCharge = 1
+	engine.Run.Phase = PhaseCombat
+	engine.Run.Combat = &CombatState{
+		NodeID:   "n2",
+		NodeType: NodeStandard,
+		Enemy: Daemon{
+			ID:           "enemy2",
+			Name:         "NullPointer",
+			ArchetypeID:  "nullpointer",
+			MaxIntegrity: 1,
+			Integrity:    1,
+			Speed:        1,
+			Stability:    1,
+			Abilities:    []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "corrupt", ModifierID: "single"}},
+			TraitID:      "persistent",
+			Statuses:     map[string]int{},
+		},
+		Queue: []Actor{ActorPlayer},
+		Round: 1,
+	}
+	engine.finishCombatWin(false, nil, []string{"Second node complete."})
+	if engine.Run.MaintenanceCharge != 1 {
+		t.Fatalf("expected maintenance charge to cap at one, got %d", engine.Run.MaintenanceCharge)
+	}
+	if !strings.Contains(strings.Join(engine.Run.PendingRewardLines, "\n"), "Maintenance charge ready (1/1).") {
+		t.Fatalf("expected capped maintenance charge log, got %+v", engine.Run.PendingRewardLines)
+	}
+}
+
 func TestChooseMaintenanceAppliesConfiguredEffects(t *testing.T) {
 	reg, err := content.Load()
 	if err != nil {
@@ -538,45 +595,94 @@ func TestChooseMaintenanceAppliesConfiguredEffects(t *testing.T) {
 	engine := New(reg, &state, 61, true)
 	engine.Run.Roster = []Daemon{
 		{ID: "a", Name: "Firewall", ArchetypeID: "firewall", MaxIntegrity: 50, Integrity: 10, Speed: 8, Stability: 12, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{"corrupted": 2}},
-		{ID: "b", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 21, Speed: 15, Stability: 9, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "single"}}, TraitID: "persistent", Statuses: map[string]int{}},
+		{ID: "b", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 21, Speed: 15, Stability: 9, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "single"}}, TraitID: "persistent", Statuses: map[string]int{"corrupted": 2}},
 	}
 	engine.Run.ActiveIndex = 0
 	engine.Run.Phase = PhaseMaintenance
+	engine.Run.MaintenanceCharge = 1
 
 	lines, err := engine.ChooseMaintenance("repair")
 	if err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
-	if engine.Run.Phase != PhaseNodeSelect {
-		t.Fatalf("expected repair to return to node select, got %s", engine.Run.Phase)
+	if engine.Run.Phase != PhaseSelectActive || engine.Run.SelectActiveMode != SelectActiveRepair {
+		t.Fatalf("expected repair to route to target selection, got phase=%s mode=%s", engine.Run.Phase, engine.Run.SelectActiveMode)
 	}
-	if engine.Run.Roster[0].Integrity != 25 {
-		t.Fatalf("expected repair to restore 15 integrity, got %d", engine.Run.Roster[0].Integrity)
+	if !strings.Contains(strings.Join(lines, "\n"), "Choose a daemon to repair.") {
+		t.Fatalf("expected repair targeting prompt, got %+v", lines)
 	}
-	if _, ok := engine.Run.Roster[0].Statuses["corrupted"]; ok {
-		t.Fatalf("expected repair to cleanse one negative status")
+
+	lines, err = engine.ChooseActive(1)
+	if err != nil {
+		t.Fatalf("repair target failed: %v", err)
 	}
-	if !strings.Contains(strings.Join(lines, "\n"), "restored 15 Integrity") {
+	if engine.Run.Roster[0].Integrity != 10 {
+		t.Fatalf("expected untargeted daemon to remain unchanged, got %d", engine.Run.Roster[0].Integrity)
+	}
+	if engine.Run.Roster[1].Integrity != 34 {
+		t.Fatalf("expected repair target to restore 13 integrity, got %d", engine.Run.Roster[1].Integrity)
+	}
+	if engine.Run.MaintenanceCharge != 0 {
+		t.Fatalf("expected repair to consume maintenance charge, got %d", engine.Run.MaintenanceCharge)
+	}
+	if _, ok := engine.Run.Roster[1].Statuses["corrupted"]; ok {
+		t.Fatalf("expected repair to cleanse one negative status from the target")
+	}
+	if engine.Run.Phase != PhaseMaintenance {
+		t.Fatalf("expected repair target resolution to return to maintenance, got %s", engine.Run.Phase)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "restored 13 Integrity") {
 		t.Fatalf("expected repair log, got %+v", lines)
 	}
 
 	engine.Run.ActiveIndex = 0
 	engine.Run.Phase = PhaseMaintenance
 	engine.Run.Roster[0].Integrity = 40
+	engine.Run.MaintenanceCharge = 1
 	lines, err = engine.ChooseMaintenance("fortify")
 	if err != nil {
 		t.Fatalf("fortify failed: %v", err)
 	}
-	if engine.Run.Phase != PhaseNodeSelect || engine.Run.Roster[0].Integrity != 45 || engine.Run.Roster[0].Statuses["stabilized"] != 2 {
-		t.Fatalf("expected fortify to heal and grant stabilized, got phase=%s daemon=%+v", engine.Run.Phase, engine.Run.Roster[0])
+	if engine.Run.Phase != PhaseSelectActive || engine.Run.SelectActiveMode != SelectActiveFortify {
+		t.Fatalf("expected fortify to route to target selection, got phase=%s mode=%s", engine.Run.Phase, engine.Run.SelectActiveMode)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "Choose a daemon to fortify.") {
+		t.Fatalf("expected fortify targeting prompt, got %+v", lines)
+	}
+
+	lines, err = engine.ChooseActive(0)
+	if err != nil {
+		t.Fatalf("fortify target failed: %v", err)
+	}
+	if engine.Run.Phase != PhaseMaintenance || engine.Run.Roster[0].Integrity != 45 || engine.Run.Roster[0].Statuses["stabilized"] != 2 {
+		t.Fatalf("expected fortify target to heal and grant stabilized, got phase=%s daemon=%+v", engine.Run.Phase, engine.Run.Roster[0])
+	}
+	if engine.Run.MaintenanceCharge != 0 {
+		t.Fatalf("expected fortify to consume maintenance charge, got %d", engine.Run.MaintenanceCharge)
 	}
 	if !strings.Contains(strings.Join(lines, "\n"), "gained Stabilized") {
 		t.Fatalf("expected fortify log, got %+v", lines)
 	}
 
-	engine.Run.ActiveIndex = 0
 	engine.Run.Phase = PhaseMaintenance
-	lines, err = engine.ChooseMaintenance("rotate")
+	engine.Run.MaintenanceCharge = 1
+	if _, err := engine.ChooseMaintenance("repair"); err != nil {
+		t.Fatalf("repair retarget start failed: %v", err)
+	}
+	lines, err = engine.CancelMaintenanceTargeting()
+	if err != nil {
+		t.Fatalf("cancel maintenance targeting failed: %v", err)
+	}
+	if engine.Run.Phase != PhaseMaintenance || engine.Run.SelectActiveMode != SelectActiveNone {
+		t.Fatalf("expected maintenance cancel to return to maintenance, got phase=%s mode=%s", engine.Run.Phase, engine.Run.SelectActiveMode)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("expected maintenance cancel to be silent, got %+v", lines)
+	}
+
+	engine.Run.ActiveIndex = 0
+	engine.Run.Phase = PhaseNodeSelect
+	lines, err = engine.BeginRotateLead()
 	if err != nil {
 		t.Fatalf("rotate failed: %v", err)
 	}
@@ -587,6 +693,22 @@ func TestChooseMaintenanceAppliesConfiguredEffects(t *testing.T) {
 		t.Fatalf("expected rotate guidance log, got %+v", lines)
 	}
 
+	lines, err = engine.CancelRotateLead()
+	if err != nil {
+		t.Fatalf("cancel rotate failed: %v", err)
+	}
+	if engine.Run.Phase != PhaseNodeSelect || engine.Run.SelectActiveMode != SelectActiveNone {
+		t.Fatalf("expected rotate cancel to return to node select, got phase=%s mode=%s", engine.Run.Phase, engine.Run.SelectActiveMode)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("expected rotate cancel to be silent, got %+v", lines)
+	}
+
+	lines, err = engine.BeginRotateLead()
+	if err != nil {
+		t.Fatalf("rotate restart failed: %v", err)
+	}
+
 	lines, err = engine.ChooseActive(1)
 	if err != nil {
 		t.Fatalf("choose active during rotate failed: %v", err)
@@ -594,10 +716,16 @@ func TestChooseMaintenanceAppliesConfiguredEffects(t *testing.T) {
 	if engine.Run.Phase != PhaseNodeSelect || engine.Run.ActiveIndex != 1 {
 		t.Fatalf("expected rotated daemon to become active and return to node select, got phase=%s active=%d", engine.Run.Phase, engine.Run.ActiveIndex)
 	}
-	if engine.Run.Roster[1].Integrity != 30 {
-		t.Fatalf("expected rotated daemon to heal by 20%%, got %d", engine.Run.Roster[1].Integrity)
+	if engine.Run.Roster[1].Integrity != 42 {
+		t.Fatalf("expected rotated daemon to heal up to max integrity, got %d", engine.Run.Roster[1].Integrity)
 	}
-	if !strings.Contains(strings.Join(lines, "\n"), "Scheduler restored 9 Integrity during maintenance.") {
+	if !strings.Contains(strings.Join(lines, "\n"), "Scheduler restored 8 Integrity during maintenance.") {
 		t.Fatalf("expected rotate heal log, got %+v", lines)
+	}
+
+	engine.Run.Phase = PhaseMaintenance
+	engine.Run.MaintenanceCharge = 0
+	if _, err := engine.ChooseMaintenance("repair"); err == nil {
+		t.Fatalf("expected repair without a stored charge to fail")
 	}
 }

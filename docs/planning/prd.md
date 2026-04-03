@@ -24,7 +24,7 @@ Start Run
 → Battle
 → Capture (optional)
 → Reward (if survive)
-→ Maintenance
+→ Maintenance Console / Node Map
 → Next Node
 → Boss
 → Win or Die → Reset
@@ -194,10 +194,13 @@ Each = **Effect + Modifier**
 
 ### Between-Fight Management
 
-* After surviving a non-boss node, choose one maintenance action
-* Repair Active
-* Fortify Link
-* Rotate Lead
+* Winning a battle grants 1 maintenance charge, capped at 1
+* Maintenance can be opened from the node map at any time before the next node
+* The maintenance screen shows the full roster state
+* Repair Daemon and Fortify Daemon each spend 1 maintenance charge
+* After choosing repair or fortify, the player selects which daemon in the roster receives the effect
+* Rotate Lead is free roster management from the node map
+* Players can move between the node map and maintenance console freely before entering the next node
 
 ---
 

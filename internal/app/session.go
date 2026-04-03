@@ -131,6 +131,7 @@ func (s *Session) Snapshot() Scene {
 		active := s.engine.ActiveDaemon()
 		lines := []string{
 			fmt.Sprintf("Active daemon: %s", daemonSummary(active.Name, active, s.registry)),
+			fmt.Sprintf("Maintenance charge: %s", formatMaintenanceCharge(run.MaintenanceCharge)),
 			"",
 			"Visible network nodes:",
 		}
@@ -158,6 +159,13 @@ func (s *Session) Snapshot() Scene {
 					})
 				}
 			}
+		}
+		choices = append(choices,
+			Choice{ID: "view:maintenance", Label: "Open Maintenance Console", Enabled: true, Details: maintenanceConsoleDetails(run.MaintenanceCharge)},
+			Choice{ID: "rotate", Label: "Rotate Lead", Enabled: len(run.Roster) > 1, Details: rotateLeadNodeDetails(len(run.Roster) > 1)},
+		)
+		if len(run.Roster) <= 1 {
+			choices[len(choices)-1].Label = "Rotate Lead (No reserve daemon)"
 		}
 		choices = append(choices, Choice{ID: "quit", Label: "Quit", Enabled: true})
 		return Scene{
@@ -272,17 +280,25 @@ func (s *Session) Snapshot() Scene {
 	case game.PhaseMaintenance:
 		active := s.engine.ActiveDaemon()
 		lines := []string{
-			"Perform one maintenance action before moving deeper into the network.",
+			"Choose repair or fortify, then select any daemon in your roster as the target.",
 			fmt.Sprintf("Active daemon: %s", daemonSummary(active.Name, active, s.registry)),
+			fmt.Sprintf("Maintenance charge: %s", formatMaintenanceCharge(run.MaintenanceCharge)),
+			"",
+			"Roster telemetry:",
 		}
+		for i, daemon := range run.Roster {
+			prefix := "  "
+			if i == run.ActiveIndex {
+				prefix = "* "
+			}
+			lines = append(lines, prefix+daemonSummary(daemon.Name, &daemon, s.registry))
+		}
+		hasCharge := run.MaintenanceCharge > 0
 		choices := []Choice{
-			{ID: "maintenance:repair", Label: "Repair Active", Enabled: true, Details: maintenanceRepairDetails()},
-			{ID: "maintenance:fortify", Label: "Fortify Link", Enabled: true, Details: maintenanceFortifyDetails()},
-			{ID: "maintenance:rotate", Label: "Rotate Lead", Enabled: len(run.Roster) > 1, Details: maintenanceRotateDetails(len(run.Roster) > 1)},
+			{ID: "maintenance:repair", Label: "Repair Daemon", Enabled: hasCharge, Details: maintenanceRepairDetails(hasCharge)},
+			{ID: "maintenance:fortify", Label: "Fortify Daemon", Enabled: hasCharge, Details: maintenanceFortifyDetails(hasCharge)},
+			{ID: "view:nodes", Label: "Back to Network Map", Enabled: true},
 			{ID: "quit", Label: "Quit", Enabled: true},
-		}
-		if len(run.Roster) <= 1 {
-			choices[2].Label = "Rotate Lead (No reserve daemon)"
 		}
 		return Scene{Kind: string(run.Phase), Title: "Maintenance", Lines: lines, Choices: choices}
 
@@ -294,6 +310,12 @@ func (s *Session) Snapshot() Scene {
 			title = "Rotate Lead"
 			lines = []string{"Select a different daemon to rotate into the lead."}
 			disableCurrent = true
+		} else if run.SelectActiveMode == game.SelectActiveRepair {
+			title = "Repair Target"
+			lines = []string{"Select a daemon to repair."}
+		} else if run.SelectActiveMode == game.SelectActiveFortify {
+			title = "Fortify Target"
+			lines = []string{"Select a daemon to fortify."}
 		}
 		choices := []Choice{}
 		for i, daemon := range run.Roster {
@@ -302,6 +324,12 @@ func (s *Session) Snapshot() Scene {
 				Label:   daemonSummary(daemon.Name, &daemon, s.registry),
 				Enabled: !disableCurrent || i != run.ActiveIndex,
 			})
+		}
+		if run.SelectActiveMode == game.SelectActiveRotateLead {
+			choices = append(choices, Choice{ID: "rotate:back", Label: "Back to Node Map", Enabled: true})
+		}
+		if run.SelectActiveMode == game.SelectActiveRepair || run.SelectActiveMode == game.SelectActiveFortify {
+			choices = append(choices, Choice{ID: "maintenance:back", Label: "Back to Maintenance", Enabled: true})
 		}
 		choices = append(choices, Choice{ID: "quit", Label: "Quit", Enabled: true})
 		return Scene{Kind: string(run.Phase), Title: title, Lines: lines, Choices: choices}
@@ -370,6 +398,16 @@ func (s *Session) Apply(choiceID string) (Scene, []Event, error) {
 		}
 	case choiceID == "continue":
 		lines, err = s.engine.Continue()
+	case choiceID == "view:maintenance":
+		lines, err = s.engine.OpenMaintenance()
+	case choiceID == "view:nodes":
+		lines, err = s.engine.OpenNodeMap()
+	case choiceID == "rotate":
+		lines, err = s.engine.BeginRotateLead()
+	case choiceID == "rotate:back":
+		lines, err = s.engine.CancelRotateLead()
+	case choiceID == "maintenance:back":
+		lines, err = s.engine.CancelMaintenanceTargeting()
 	case strings.HasPrefix(choiceID, "maintenance:"):
 		lines, err = s.engine.ChooseMaintenance(strings.TrimPrefix(choiceID, "maintenance:"))
 	case strings.HasPrefix(choiceID, "active:"):
@@ -592,40 +630,83 @@ func inspectDetails() *ChoiceDetails {
 	}
 }
 
-func maintenanceRepairDetails() *ChoiceDetails {
+func formatMaintenanceCharge(charge int) string {
+	if charge > 0 {
+		return fmt.Sprintf("%d/1 ready.", charge)
+	}
+	return "0/1 empty."
+}
+
+func maintenanceConsoleDetails(charge int) *ChoiceDetails {
+	preview := "Open the maintenance console. Repair and Fortify spend a stored charge; you can bank up to one."
+	lines := []string{
+		"Review and spend your stored maintenance charge.",
+		"",
+		"Repair Active and Fortify Link each consume 1 charge.",
+		"You can leave the console and come back before entering the next node.",
+		"Charge cap: 1.",
+	}
+	if charge > 0 {
+		lines = append(lines, "", "Current charge: ready.")
+	} else {
+		lines = append(lines, "", "Current charge: empty until you win another battle.")
+	}
 	return &ChoiceDetails{
-		Title:   "Repair Active",
-		Preview: "Restore 30% max Integrity, minimum 10, and cleanse one negative status.",
-		Lines: []string{
-			"Perform a focused repair cycle on the active daemon.",
-			"",
-			"Restore: 30% of max Integrity.",
-			"Minimum restore: 10.",
-			"Also clears one negative status if present.",
-			"Best when the current lead is damaged or corrupted.",
-		},
+		Title:   "Maintenance Console",
+		Preview: preview,
+		Lines:   lines,
 	}
 }
 
-func maintenanceFortifyDetails() *ChoiceDetails {
+func maintenanceRepairDetails(enabled bool) *ChoiceDetails {
+	preview := "Pick any daemon, then restore 30% max Integrity, minimum 10, and cleanse one negative status."
+	lines := []string{
+		"Choose a daemon, then perform a focused repair cycle.",
+		"",
+		"Cost: 1 maintenance charge.",
+		"Restore: 30% of max Integrity.",
+		"Minimum restore: 10.",
+		"Also clears one negative status if present.",
+		"Best when any roster member is damaged or corrupted.",
+	}
+	if !enabled {
+		lines = append(lines, "", "Unavailable: no maintenance charge is stored.")
+		preview = "Unavailable until you bank a maintenance charge from a battle win."
+	}
 	return &ChoiceDetails{
-		Title:   "Fortify Link",
-		Preview: "Restore 10% max Integrity, minimum 4, and grant Stabilized for the next fight.",
-		Lines: []string{
-			"Light recovery plus a defensive hardening pass.",
-			"",
-			"Restore: 10% of max Integrity.",
-			"Minimum restore: 4.",
-			"Grants Stabilized(2).",
-			"Best when the current lead is healthy enough and you want safer setup in the next node.",
-		},
+		Title:   "Repair Daemon",
+		Preview: preview,
+		Lines:   lines,
 	}
 }
 
-func maintenanceRotateDetails(enabled bool) *ChoiceDetails {
+func maintenanceFortifyDetails(enabled bool) *ChoiceDetails {
+	preview := "Pick any daemon, then restore 10% max Integrity, minimum 4, and grant Stabilized for the next fight."
+	lines := []string{
+		"Choose a daemon, then apply a defensive hardening pass.",
+		"",
+		"Cost: 1 maintenance charge.",
+		"Restore: 10% of max Integrity.",
+		"Minimum restore: 4.",
+		"Grants Stabilized(2).",
+		"Best when you want to prep a specific daemon for the next node.",
+	}
+	if !enabled {
+		lines = append(lines, "", "Unavailable: no maintenance charge is stored.")
+		preview = "Unavailable until you bank a maintenance charge from a battle win."
+	}
+	return &ChoiceDetails{
+		Title:   "Fortify Daemon",
+		Preview: preview,
+		Lines:   lines,
+	}
+}
+
+func rotateLeadNodeDetails(enabled bool) *ChoiceDetails {
 	lines := []string{
 		"Hand the lead slot to a reserve daemon.",
 		"",
+		"Cost: free.",
 		"After selection: the new active daemon restores 20% of max Integrity.",
 		"Minimum restore: 6.",
 		"Best when you want to preserve the current lead or pivot into a better matchup.",

@@ -1394,6 +1394,9 @@ func decorateLines(scene app.Scene) []string {
 	if scene.Kind == "inspect" {
 		return decorateInspectLines(scene.Lines)
 	}
+	if scene.Kind == "maintenance" {
+		return decorateMaintenanceLines(scene.Lines)
+	}
 	lines := make([]string, 0, len(scene.Lines)+4)
 	for _, line := range scene.Lines {
 		if strings.TrimSpace(line) == "" {
@@ -1403,6 +1406,37 @@ func decorateLines(scene app.Scene) []string {
 		lines = append(lines, stylizeLine(line))
 	}
 	return lines
+}
+
+func decorateMaintenanceLines(lines []string) []string {
+	out := make([]string, 0, len(lines)+3)
+	for _, line := range lines {
+		switch {
+		case strings.TrimSpace(line) == "":
+			out = append(out, "")
+		case strings.HasPrefix(line, "Choose repair or fortify"):
+			prefix, suffix, ok := strings.Cut(line, ", then ")
+			if !ok {
+				out = append(out, colorize(ansiBold+ansiGreen, line))
+				continue
+			}
+			out = append(out, colorize(ansiBold+ansiGreen, prefix)+colorize(ansiDim, ", then "+suffix))
+		case strings.HasPrefix(line, "Active daemon: "):
+			out = append(out, stylizeMaintenanceSummary(line))
+			out = append(out, colorize(ansiDim+ansiCyan, ":: repair // fortify // bank ::"))
+		case strings.HasPrefix(line, "Maintenance charge: "):
+			out = append(out, stylizeMaintenanceCharge(line))
+		case line == "Roster telemetry:":
+			out = append(out, colorize(ansiBold+ansiGreen, line))
+		case strings.HasPrefix(line, "* "):
+			out = append(out, colorize(ansiBold+ansiGreen, "* ")+stylizeTraceSummary(strings.TrimPrefix(line, "* "), ansiCyan))
+		case strings.HasPrefix(line, "  "):
+			out = append(out, "  "+stylizeTraceSummary(strings.TrimSpace(line), ansiCyan))
+		default:
+			out = append(out, stylizeLine(line))
+		}
+	}
+	return out
 }
 
 func decorateInspectLines(lines []string) []string {
@@ -1449,6 +1483,26 @@ func stylizeLine(line string) string {
 	default:
 		return line
 	}
+}
+
+func stylizeMaintenanceSummary(line string) string {
+	label, rest, ok := strings.Cut(line, ": ")
+	if !ok {
+		return stylizeTraceSummary(line, ansiCyan)
+	}
+	return colorize(ansiBold+ansiCyan, label+": ") + stylizeTraceSummary(rest, ansiCyan)
+}
+
+func stylizeMaintenanceCharge(line string) string {
+	label, rest, ok := strings.Cut(line, ": ")
+	if !ok {
+		return line
+	}
+	color := ansiDim
+	if strings.Contains(rest, "ready") {
+		color = ansiBold + ansiGreen
+	}
+	return colorize(ansiBold+ansiCyan, label+": ") + colorize(color, rest)
 }
 
 func stylizeTraceSummary(line string, actorColor string) string {
@@ -1594,12 +1648,26 @@ func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool)
 
 func (m model) renderSceneMenu(width int) string {
 	lines := renderMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+	if m.scene.Kind == "maintenance" {
+		lines = renderMaintenanceMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+	}
 	detail := m.selectedChoiceDetails()
 	if detail != nil && m.playback == nil {
 		lines = append(lines, "")
-		lines = append(lines, colorize(ansiCyan, "Preview:"))
-		lines = append(lines, detail.Preview)
-		lines = append(lines, colorize(ansiDim, "Press i for full command detail."))
+		if m.scene.Kind == "maintenance" {
+			lines = append(lines, colorize(ansiDim+ansiCyan, ":: service note ::"))
+			lines = append(lines, colorize(ansiCyan, "Preview:"))
+			if code := maintenanceChoiceColor(selectedChoiceID(m.scene, m.selectedIndex)); code != "" {
+				lines = append(lines, colorize(code, detail.Preview))
+			} else {
+				lines = append(lines, detail.Preview)
+			}
+			lines = append(lines, colorize(ansiDim, "Press i for full command detail."))
+		} else {
+			lines = append(lines, colorize(ansiCyan, "Preview:"))
+			lines = append(lines, detail.Preview)
+			lines = append(lines, colorize(ansiDim, "Press i for full command detail."))
+		}
 	}
 	return panel("COMMAND DECK", lines, width)
 }
@@ -1647,6 +1715,70 @@ func renderMenuLines(choices []app.Choice, selectedIndex int, locked bool) []str
 		lines = append(lines, "", colorize(ansiYellow, "Sequence running. Space fast-forward."))
 	}
 	return lines
+}
+
+func renderMaintenanceMenuLines(choices []app.Choice, selectedIndex int, locked bool) []string {
+	lines := []string{}
+	for i, choice := range choices {
+		prefix := "  [ ]"
+		label := maintenanceChoiceLabel(choice)
+		if locked {
+			lines = append(lines, colorize(ansiDim, fmt.Sprintf("%s %s", prefix, choice.Label)))
+			continue
+		}
+		if i == selectedIndex {
+			prefix = colorize(ansiGreen, ">> [*]")
+			label = colorize(ansiBold+ansiGreen, choice.Label)
+		}
+		lines = append(lines, fmt.Sprintf("%s %s", prefix, label))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, colorize(ansiDim, "No available actions"))
+	}
+	if locked {
+		lines = append(lines, "", colorize(ansiYellow, "Sequence running. Space fast-forward."))
+	}
+	return lines
+}
+
+func maintenanceChoiceLabel(choice app.Choice) string {
+	switch choice.ID {
+	case "maintenance:repair":
+		return colorize(ansiBold+ansiGreen, choice.Label)
+	case "maintenance:fortify":
+		return colorize(ansiBold+ansiCyan, choice.Label)
+	case "rotate":
+		return colorize(ansiBold+ansiYellow, choice.Label)
+	case "view:maintenance", "view:nodes":
+		return colorize(ansiBold+ansiCyan, choice.Label)
+	case "quit":
+		return colorize(ansiDim, choice.Label)
+	default:
+		return choice.Label
+	}
+}
+
+func maintenanceChoiceColor(choiceID string) string {
+	switch choiceID {
+	case "maintenance:repair":
+		return ansiBold + ansiGreen
+	case "maintenance:fortify":
+		return ansiBold + ansiCyan
+	case "rotate":
+		return ansiBold + ansiYellow
+	case "view:maintenance", "view:nodes":
+		return ansiBold + ansiCyan
+	default:
+		return ""
+	}
+}
+
+func selectedChoiceID(scene app.Scene, selectedIndex int) string {
+	choice, ok := selectedChoice(scene, selectedIndex)
+	if !ok {
+		return ""
+	}
+	return choice.ID
 }
 
 func (m *model) openChoiceModal() {

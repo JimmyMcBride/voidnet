@@ -88,25 +88,26 @@ func maintenanceTestScene() app.Scene {
 		Kind:  "maintenance",
 		Title: "Maintenance",
 		Lines: []string{
-			"Perform one maintenance action before moving deeper into the network.",
+			"Choose repair or fortify, then select any daemon in your roster as the target.",
 			"Active daemon: Firewall 55/55 INT | SPD 9 | STB 13 | Encrypted",
+			"Maintenance charge: 1/1 ready.",
+			"",
+			"Roster telemetry:",
+			"* Firewall 55/55 INT | SPD 9 | STB 13 | Encrypted",
+			"  Scheduler 34/42 INT | SPD 15 | STB 9 | Persistent",
 		},
 		Choices: []app.Choice{
-			{ID: "maintenance:repair", Label: "Repair Active", Enabled: true, Details: &app.ChoiceDetails{
-				Title:   "Repair Active",
-				Preview: "Restore 30% max Integrity, minimum 10, and cleanse one negative status.",
+			{ID: "maintenance:repair", Label: "Repair Daemon", Enabled: true, Details: &app.ChoiceDetails{
+				Title:   "Repair Daemon",
+				Preview: "Pick any daemon, then restore 30% max Integrity, minimum 10, and cleanse one negative status.",
 				Lines:   []string{"Repair preview"},
 			}},
-			{ID: "maintenance:fortify", Label: "Fortify Link", Enabled: true, Details: &app.ChoiceDetails{
-				Title:   "Fortify Link",
-				Preview: "Restore 10% max Integrity, minimum 4, and grant Stabilized for the next fight.",
+			{ID: "maintenance:fortify", Label: "Fortify Daemon", Enabled: true, Details: &app.ChoiceDetails{
+				Title:   "Fortify Daemon",
+				Preview: "Pick any daemon, then restore 10% max Integrity, minimum 4, and grant Stabilized for the next fight.",
 				Lines:   []string{"Fortify preview"},
 			}},
-			{ID: "maintenance:rotate", Label: "Rotate Lead", Enabled: true, Details: &app.ChoiceDetails{
-				Title:   "Rotate Lead",
-				Preview: "Choose a reserve daemon; the new lead restores 20% max Integrity, minimum 6.",
-				Lines:   []string{"Rotate preview"},
-			}},
+			{ID: "view:nodes", Label: "Back to Network Map", Enabled: true},
 			{ID: "quit", Label: "Quit", Enabled: true},
 		},
 	}
@@ -517,11 +518,20 @@ func TestMaintenanceMenuShowsSelectedChoicePreview(t *testing.T) {
 	if !strings.Contains(view, "Preview:") {
 		t.Fatalf("expected maintenance command deck to show a preview block, got:\n%s", view)
 	}
-	if !strings.Contains(view, "Restore 30% max Integrity, minimum 10, and cleanse one negative status.") {
+	if !strings.Contains(view, "Pick any daemon, then restore 30% max Integrity, minimum 10, and cleanse one negative status.") {
 		t.Fatalf("expected maintenance preview text, got:\n%s", view)
 	}
 	if !strings.Contains(view, "Press i for full command detail.") {
 		t.Fatalf("expected maintenance detail hint, got:\n%s", view)
+	}
+	if !strings.Contains(view, ":: repair // fortify // bank ::") {
+		t.Fatalf("expected maintenance summary ornament, got:\n%s", view)
+	}
+	if !strings.Contains(view, ":: service note ::") {
+		t.Fatalf("expected maintenance preview ornament, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Roster telemetry:") || !strings.Contains(view, "55/55 INT") || !strings.Contains(view, "34/42 INT") {
+		t.Fatalf("expected maintenance roster summary, got:\n%s", view)
 	}
 }
 

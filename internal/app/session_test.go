@@ -348,7 +348,7 @@ func TestInspectSceneExplainsTraitsAndActiveStatuses(t *testing.T) {
 	}
 }
 
-func TestMaintenanceSceneAndRotateSelectionState(t *testing.T) {
+func TestMaintenanceAndNodeMapManagementScenes(t *testing.T) {
 	reg, err := content.Load()
 	if err != nil {
 		t.Fatalf("content load failed: %v", err)
@@ -361,25 +361,75 @@ func TestMaintenanceSceneAndRotateSelectionState(t *testing.T) {
 		{ID: "a", Name: "Firewall", ArchetypeID: "firewall", MaxIntegrity: 48, Integrity: 48, Speed: 8, Stability: 12, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{}},
 	}
 	session.engine.Run.ActiveIndex = 0
-	session.engine.Run.Phase = game.PhaseMaintenance
+	session.engine.Run.Phase = game.PhaseNodeSelect
+	session.engine.Run.MaintenanceCharge = 0
 
 	scene := session.Snapshot()
-	if scene.Kind != string(game.PhaseMaintenance) {
-		t.Fatalf("expected maintenance scene, got %q", scene.Kind)
+	if scene.Kind != string(game.PhaseNodeSelect) {
+		t.Fatalf("expected node select scene, got %q", scene.Kind)
 	}
-	if len(scene.Choices) < 3 || scene.Choices[2].Enabled {
+	if !strings.Contains(strings.Join(scene.Lines, "\n"), "Maintenance charge: 0/1 empty.") {
+		t.Fatalf("expected node map scene to show empty maintenance charge, got %+v", scene.Lines)
+	}
+	if len(scene.Choices) < 2 || scene.Choices[len(scene.Choices)-2].Enabled {
 		t.Fatalf("expected rotate to be disabled without a reserve daemon, got %+v", scene.Choices)
 	}
-	if scene.Choices[0].Details == nil || !strings.Contains(scene.Choices[0].Details.Preview, "30%") {
-		t.Fatalf("expected maintenance repair choice to include details, got %+v", scene.Choices[0])
+	if scene.Choices[len(scene.Choices)-3].Details == nil || !strings.Contains(scene.Choices[len(scene.Choices)-3].Details.Preview, "maintenance console") {
+		t.Fatalf("expected maintenance console choice to include details, got %+v", scene.Choices)
 	}
-	if scene.Choices[2].Details == nil || !strings.Contains(scene.Choices[2].Details.Preview, "Unavailable") {
-		t.Fatalf("expected disabled rotate choice to explain why it is unavailable, got %+v", scene.Choices[2])
+	if scene.Choices[len(scene.Choices)-2].Details == nil || !strings.Contains(scene.Choices[len(scene.Choices)-2].Details.Preview, "Unavailable") {
+		t.Fatalf("expected disabled rotate choice to explain why it is unavailable, got %+v", scene.Choices[len(scene.Choices)-2])
+	}
+
+	if _, _, err := session.Apply("view:maintenance"); err != nil {
+		t.Fatalf("open maintenance failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseMaintenance) {
+		t.Fatalf("expected maintenance scene, got %+v", scene)
+	}
+	if scene.Choices[0].Enabled || scene.Choices[1].Enabled {
+		t.Fatalf("expected maintenance spending actions to be disabled without charge, got %+v", scene.Choices)
+	}
+	if !strings.Contains(strings.Join(scene.Lines, "\n"), "Roster telemetry:") {
+		t.Fatalf("expected maintenance scene to include roster telemetry, got %+v", scene.Lines)
+	}
+
+	session.engine.Run.MaintenanceCharge = 1
+	scene = session.Snapshot()
+	if !scene.Choices[0].Enabled || !strings.Contains(scene.Choices[0].Details.Preview, "30%") {
+		t.Fatalf("expected repair to become available when charge is stored, got %+v", scene.Choices[0])
+	}
+	if _, _, err := session.Apply("maintenance:repair"); err != nil {
+		t.Fatalf("maintenance repair failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseSelectActive) || scene.Title != "Repair Target" {
+		t.Fatalf("expected repair to route to target selection, got %+v", scene)
+	}
+	foundMaintenanceBack := false
+	for _, choice := range scene.Choices {
+		if choice.ID == "maintenance:back" {
+			foundMaintenanceBack = true
+		}
+	}
+	if !foundMaintenanceBack {
+		t.Fatalf("expected maintenance target selection to include back option, got %+v", scene.Choices)
+	}
+	if _, _, err := session.Apply("maintenance:back"); err != nil {
+		t.Fatalf("maintenance back failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseMaintenance) {
+		t.Fatalf("expected maintenance back to return to maintenance, got %+v", scene)
+	}
+	if _, _, err := session.Apply("view:nodes"); err != nil {
+		t.Fatalf("back to node map failed: %v", err)
 	}
 
 	session.engine.Run.Roster = append(session.engine.Run.Roster, game.Daemon{ID: "b", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 42, Speed: 15, Stability: 9, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "single"}}, TraitID: "persistent", Statuses: map[string]int{}})
-	if _, _, err := session.Apply("maintenance:rotate"); err != nil {
-		t.Fatalf("maintenance rotate failed: %v", err)
+	if _, _, err := session.Apply("rotate"); err != nil {
+		t.Fatalf("node-map rotate failed: %v", err)
 	}
 	scene = session.Snapshot()
 	if scene.Kind != string(game.PhaseSelectActive) || scene.Title != "Rotate Lead" {
@@ -387,5 +437,21 @@ func TestMaintenanceSceneAndRotateSelectionState(t *testing.T) {
 	}
 	if scene.Choices[0].Enabled {
 		t.Fatalf("expected current active daemon to be disabled during rotate, got %+v", scene.Choices)
+	}
+	foundBack := false
+	for _, choice := range scene.Choices {
+		if choice.ID == "rotate:back" {
+			foundBack = true
+		}
+	}
+	if !foundBack {
+		t.Fatalf("expected rotate lead selection to include a back option, got %+v", scene.Choices)
+	}
+	if _, _, err := session.Apply("rotate:back"); err != nil {
+		t.Fatalf("rotate back failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseNodeSelect) {
+		t.Fatalf("expected rotate back to return to node select, got %+v", scene)
 	}
 }
