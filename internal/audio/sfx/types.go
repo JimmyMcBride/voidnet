@@ -41,10 +41,16 @@ const (
 	PresetDaemonAppears   Preset = "daemon_appears"
 	PresetDaemonCaptured  Preset = "daemon_captured"
 	PresetCorruptionBurst Preset = "corruption_burst"
+	PresetPatchRestore    Preset = "patch_restore"
+	PresetBackfire        Preset = "backfire"
+	PresetCrash           Preset = "crash"
 	PresetAlert           Preset = "alert"
 	PresetLevelClear      Preset = "level_clear"
+	PresetUnlock          Preset = "unlock"
 	PresetSystemBoot      Preset = "system_boot"
 	PresetGlitchStinger   Preset = "glitch_stinger"
+	PresetRunVictory      Preset = "run_victory"
+	PresetRunDefeat       Preset = "run_defeat"
 )
 
 var allPresets = []Preset{
@@ -57,10 +63,16 @@ var allPresets = []Preset{
 	PresetDaemonAppears,
 	PresetDaemonCaptured,
 	PresetCorruptionBurst,
+	PresetPatchRestore,
+	PresetBackfire,
+	PresetCrash,
 	PresetAlert,
 	PresetLevelClear,
+	PresetUnlock,
 	PresetSystemBoot,
 	PresetGlitchStinger,
+	PresetRunVictory,
+	PresetRunDefeat,
 }
 
 func AllPresets() []Preset {

@@ -14,10 +14,16 @@ const (
 	EventDaemonAppears   Event = Event(sfx.PresetDaemonAppears)
 	EventDaemonCaptured  Event = Event(sfx.PresetDaemonCaptured)
 	EventCorruptionBurst Event = Event(sfx.PresetCorruptionBurst)
+	EventPatchRestore    Event = Event(sfx.PresetPatchRestore)
+	EventBackfire        Event = Event(sfx.PresetBackfire)
+	EventCrash           Event = Event(sfx.PresetCrash)
 	EventAlert           Event = Event(sfx.PresetAlert)
 	EventLevelClear      Event = Event(sfx.PresetLevelClear)
+	EventUnlock          Event = Event(sfx.PresetUnlock)
 	EventSystemBoot      Event = Event(sfx.PresetSystemBoot)
 	EventGlitchStinger   Event = Event(sfx.PresetGlitchStinger)
+	EventRunVictory      Event = Event(sfx.PresetRunVictory)
+	EventRunDefeat       Event = Event(sfx.PresetRunDefeat)
 )
 
 func GenerateEventSFX(event Event, seed int64) ([]int16, int, error) {

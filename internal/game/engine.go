@@ -20,6 +20,7 @@ const (
 	PhaseInspect       Phase = "inspect"
 	PhaseReplace       Phase = "replace"
 	PhaseReward        Phase = "reward"
+	PhaseMaintenance   Phase = "maintenance"
 	PhaseSelectActive  Phase = "select_active"
 	PhaseGameOver      Phase = "game_over"
 )
@@ -37,6 +38,14 @@ type Actor string
 const (
 	ActorPlayer Actor = "player"
 	ActorEnemy  Actor = "enemy"
+)
+
+type ActiveSelectionContext string
+
+const (
+	SelectActiveNone       ActiveSelectionContext = ""
+	SelectActiveAfterLoss  ActiveSelectionContext = "after_loss"
+	SelectActiveRotateLead ActiveSelectionContext = "rotate_lead"
 )
 
 type Stats struct {
@@ -104,6 +113,8 @@ type RunState struct {
 	PendingRewardLines []string
 	RecentUnlocks      []string
 	Inspecting         bool
+	FirstCombatBoosted bool
+	SelectActiveMode   ActiveSelectionContext
 	Won                bool
 	Lost               bool
 }
@@ -199,6 +210,14 @@ func (e *Engine) ChooseNode(nodeID string) ([]string, error) {
 		Round:      1,
 		CanCapture: node.Type != NodeBoss,
 	}
+	starterBoosted := false
+	if !e.Run.FirstCombatBoosted {
+		if active := e.activeDaemon(); active != nil {
+			e.applyStatus(active, "stabilized", 2)
+			e.Run.FirstCombatBoosted = true
+			starterBoosted = true
+		}
+	}
 	e.refreshQueue()
 	e.Run.Phase = PhaseCombat
 
@@ -206,6 +225,11 @@ func (e *Engine) ChooseNode(nodeID string) ([]string, error) {
 		fmt.Sprintf("Entered %s.", node.Label),
 		fmt.Sprintf("Encountered %s.", enemy.Name),
 	)
+	if starterBoosted {
+		if active := e.activeDaemon(); active != nil {
+			lines = append(lines, fmt.Sprintf("%s gained Stabilized.", active.Name))
+		}
+	}
 	e.setCombatLog(lines)
 	return lines, nil
 }
@@ -242,6 +266,7 @@ func (e *Engine) UseAbility(slot int) ([]string, error) {
 
 	ability := player.Abilities[slot]
 	lines := e.resolveAbility(ActorPlayer, ability)
+	lines = append(lines, e.resolveForcedTurns()...)
 	e.setCombatLog(lines)
 	return lines, nil
 }
@@ -253,9 +278,14 @@ func (e *Engine) AdvanceEnemyTurn() ([]string, error) {
 	if e.isPlayerTurn() {
 		return nil, fmt.Errorf("it is the player's turn")
 	}
+	if lines := e.resolveForcedTurns(); len(lines) > 0 {
+		e.setCombatLog(lines)
+		return lines, nil
+	}
 
 	ability := e.pickEnemyAbility()
 	lines := e.resolveAbility(ActorEnemy, ability)
+	lines = append(lines, e.resolveForcedTurns()...)
 	e.setCombatLog(lines)
 	return lines, nil
 }
@@ -289,6 +319,7 @@ func (e *Engine) AttemptCapture() ([]string, error) {
 
 	e.consumeTurn()
 	lines = append(lines, e.postTurnResolution(ActorPlayer)...)
+	lines = append(lines, e.resolveForcedTurns()...)
 	e.setCombatLog(lines)
 	return lines, nil
 }
@@ -328,9 +359,10 @@ func (e *Engine) Continue() ([]string, error) {
 		if e.Run.Won {
 			e.Run.Phase = PhaseGameOver
 		} else if e.Run.ActiveIndex == -1 && len(e.Run.Roster) > 0 {
+			e.Run.SelectActiveMode = SelectActiveAfterLoss
 			e.Run.Phase = PhaseSelectActive
 		} else {
-			e.Run.Phase = PhaseNodeSelect
+			e.Run.Phase = PhaseMaintenance
 		}
 		return nil, nil
 	case PhaseGameOver:
@@ -354,9 +386,67 @@ func (e *Engine) ChooseActive(index int) ([]string, error) {
 	if index < 0 || index >= len(e.Run.Roster) {
 		return nil, fmt.Errorf("active index %d out of range", index)
 	}
+	if e.Run.SelectActiveMode == SelectActiveRotateLead && index == e.Run.ActiveIndex {
+		return nil, fmt.Errorf("choose a different daemon to rotate into the lead")
+	}
 	e.Run.ActiveIndex = index
-	e.Run.Phase = PhaseNodeSelect
-	return []string{fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name)}, nil
+	lines := []string{fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name)}
+	switch e.Run.SelectActiveMode {
+	case SelectActiveAfterLoss:
+		e.Run.SelectActiveMode = SelectActiveNone
+		e.Run.Phase = PhaseMaintenance
+	case SelectActiveRotateLead:
+		active := e.activeDaemon()
+		if restored := e.restoreIntegrityPercent(active, 0.20, 6); restored > 0 {
+			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", active.Name, restored))
+		}
+		e.Run.SelectActiveMode = SelectActiveNone
+		e.Run.Phase = PhaseNodeSelect
+	default:
+		e.Run.Phase = PhaseNodeSelect
+	}
+	return lines, nil
+}
+
+func (e *Engine) ChooseMaintenance(action string) ([]string, error) {
+	if e.Run.Phase != PhaseMaintenance {
+		return nil, fmt.Errorf("maintenance is not active")
+	}
+
+	active := e.activeDaemon()
+	if active == nil {
+		return nil, fmt.Errorf("no active daemon")
+	}
+
+	lines := []string{}
+	switch action {
+	case "repair":
+		if restored := e.restoreIntegrityPercent(active, 0.30, 10); restored > 0 {
+			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", active.Name, restored))
+		}
+		if removed := e.cleanseOneNegative(active); removed != "" {
+			lines = append(lines, fmt.Sprintf("%s cleared %s.", active.Name, e.Content.Statuses[removed].Name))
+		}
+		e.Run.Phase = PhaseNodeSelect
+	case "fortify":
+		if restored := e.restoreIntegrityPercent(active, 0.10, 4); restored > 0 {
+			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", active.Name, restored))
+		}
+		e.applyStatus(active, "stabilized", 2)
+		lines = append(lines, fmt.Sprintf("%s gained Stabilized.", active.Name))
+		e.Run.Phase = PhaseNodeSelect
+	case "rotate":
+		if len(e.Run.Roster) <= 1 {
+			return nil, fmt.Errorf("no reserve daemon is available")
+		}
+		e.Run.SelectActiveMode = SelectActiveRotateLead
+		e.Run.Phase = PhaseSelectActive
+		lines = append(lines, "Choose a reserve daemon to rotate into the lead.")
+	default:
+		return nil, fmt.Errorf("unknown maintenance action %q", action)
+	}
+
+	return lines, nil
 }
 
 func (e *Engine) ActiveDaemon() *Daemon {
@@ -573,7 +663,12 @@ func (e *Engine) generateDaemonWithModifierPool(archetypeID string, difficulty i
 	if len(allowedModifiers) > 0 {
 		modifierPool = append([]string(nil), allowedModifiers...)
 	} else if starter {
-		modifierPool = append([]string(nil), e.Meta.UnlockedModifiers...)
+		for _, id := range e.Meta.UnlockedModifiers {
+			if id == "unstable" {
+				continue
+			}
+			modifierPool = append(modifierPool, id)
+		}
 		if len(modifierPool) == 0 {
 			modifierPool = []string{"single"}
 		}
@@ -587,7 +682,10 @@ func (e *Engine) generateDaemonWithModifierPool(archetypeID string, difficulty i
 		modifierPool = []string{forceModifier}
 	}
 
-	effectIDs := e.pickAbilityEffects(def.EffectPool)
+	effectIDs := e.fixedAbilityEffects(archetypeID)
+	if len(effectIDs) == 0 {
+		effectIDs = e.pickAbilityEffects(def.EffectPool)
+	}
 
 	abilities := make([]Ability, 0, 2)
 	for _, effectID := range effectIDs {
@@ -628,6 +726,21 @@ func (e *Engine) enemyModifierPool(difficulty int) []string {
 		pool = append(pool, id)
 	}
 	return uniqueStrings(pool)
+}
+
+func (e *Engine) fixedAbilityEffects(archetypeID string) []string {
+	switch archetypeID {
+	case "nullpointer":
+		return []string{"spike", "corrupt"}
+	case "memoryleaker":
+		return []string{"spike", "leak"}
+	case "firewall":
+		return []string{"spike", "patch"}
+	case "scheduler":
+		return []string{"spike", "delay"}
+	default:
+		return nil
+	}
 }
 
 func (e *Engine) resolveAbility(actor Actor, ability Ability) []string {
@@ -822,6 +935,26 @@ func (e *Engine) postTurnResolution(actor Actor) []string {
 	return lines
 }
 
+func (e *Engine) resolveForcedTurns() []string {
+	lines := []string{}
+	for e.Run.Phase == PhaseCombat && e.Run.Combat != nil && len(e.Run.Combat.Queue) > 0 {
+		actor := e.Run.Combat.Queue[0]
+		target := e.combatantForActor(actor)
+		if target == nil {
+			break
+		}
+		if _, delayed := target.Statuses["delayed"]; !delayed {
+			break
+		}
+
+		delete(target.Statuses, "delayed")
+		lines = append(lines, fmt.Sprintf("%s lost the turn to Delayed.", e.combatantLabel(actor, target)))
+		e.consumeTurn()
+		lines = append(lines, e.postTurnResolution(actor)...)
+	}
+	return lines
+}
+
 func (e *Engine) finishCombatLoss(lines []string) {
 	node := e.Run.Nodes[e.Run.Combat.NodeID]
 	node.Resolved = true
@@ -907,7 +1040,17 @@ func (e *Engine) restoreVictoryIntegrity(daemon *Daemon) int {
 		return 0
 	}
 
-	recovery := max(6, int(math.Ceil(float64(daemon.MaxIntegrity)*0.20)))
+	recovery := max(8, int(math.Ceil(float64(daemon.MaxIntegrity)*0.25)))
+	before := daemon.Integrity
+	daemon.Integrity = min(daemon.MaxIntegrity, daemon.Integrity+recovery)
+	return daemon.Integrity - before
+}
+
+func (e *Engine) restoreIntegrityPercent(daemon *Daemon, percent float64, minimum int) int {
+	if daemon == nil || daemon.MaxIntegrity == 0 {
+		return 0
+	}
+	recovery := max(minimum, int(math.Ceil(float64(daemon.MaxIntegrity)*percent)))
 	before := daemon.Integrity
 	daemon.Integrity = min(daemon.MaxIntegrity, daemon.Integrity+recovery)
 	return daemon.Integrity - before
@@ -947,6 +1090,20 @@ func (e *Engine) activeDaemon() *Daemon {
 		return nil
 	}
 	return &e.Run.Roster[e.Run.ActiveIndex]
+}
+
+func (e *Engine) combatantForActor(actor Actor) *Daemon {
+	switch actor {
+	case ActorPlayer:
+		return e.activeDaemon()
+	case ActorEnemy:
+		if e.Run.Combat == nil {
+			return nil
+		}
+		return &e.Run.Combat.Enemy
+	default:
+		return nil
+	}
 }
 
 func (e *Engine) effectiveSpeed(d *Daemon) int {
@@ -1060,6 +1217,9 @@ func (e *Engine) tickStatuses(target *Daemon, label string) []string {
 	lines := []string{}
 	for statusID, duration := range target.Statuses {
 		def := e.Content.Statuses[statusID]
+		if statusID == "delayed" {
+			continue
+		}
 		if def.DOTDamage > 0 {
 			target.Integrity = max(0, target.Integrity-def.DOTDamage)
 			lines = append(lines, fmt.Sprintf("%s suffered %d damage from %s.", label, def.DOTDamage, def.Name))

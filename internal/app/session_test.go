@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"voidnet/internal/audio"
 	"voidnet/internal/content"
 	"voidnet/internal/game"
 	"voidnet/internal/meta"
@@ -172,6 +173,47 @@ func TestAdvanceEnemyTurnResolvesOneEnemyAction(t *testing.T) {
 	if len(events) == 0 || !strings.Contains(events[0].Message, "Enemy") || !strings.Contains(events[0].Message, " used ") {
 		t.Fatalf("expected enemy action log, got %+v", events)
 	}
+	foundHit := false
+	for _, event := range events {
+		if event.Cue == audio.EventHackSuccess {
+			foundHit = true
+			break
+		}
+	}
+	if !foundHit {
+		t.Fatalf("expected enemy action log to include a hit cue, got %+v", events)
+	}
+	if last := events[len(events)-1].Cue; last != audio.EventHackSuccess {
+		t.Fatalf("expected the final opener result to map to hack success, got %+v", events)
+	}
+}
+
+func TestCueForLineMapsKeyGameplayEvents(t *testing.T) {
+	tests := []struct {
+		line string
+		cue  audio.Event
+	}{
+		{"Started a new run with seed 123.", audio.EventSystemBoot},
+		{"Entered signal.root.", audio.EventScan},
+		{"Encountered NullPointer.", audio.EventDaemonAppears},
+		{"Inspecting combat state.", audio.EventScan},
+		{"Isolation successful.", audio.EventDaemonCaptured},
+		{"Isolation failed. The daemon resisted the breach.", audio.EventHackFail},
+		{"Single backfired for 4 damage.", audio.EventBackfire},
+		{"Enemy NullPointer crashed.", audio.EventCrash},
+		{"Firewall restored 8 Integrity.", audio.EventPatchRestore},
+		{"Your Firewall is now Corrupted.", audio.EventCorruptionBurst},
+		{"Enemy MemoryLeaker suffered 3 damage from Leaking.", audio.EventCorruptionBurst},
+		{"Enemy Scheduler is now Delayed.", audio.EventGlitchStinger},
+		{"Enemy Scheduler lost the turn to Delayed.", audio.EventGlitchStinger},
+		{"Your Firewall took 11 damage.", audio.EventHackSuccess},
+	}
+
+	for _, tc := range tests {
+		if got := cueForLine(tc.line); got != tc.cue {
+			t.Fatalf("cueForLine(%q) = %q, want %q", tc.line, got, tc.cue)
+		}
+	}
 }
 
 func TestCombatChoiceDetailsExplainStatusEffects(t *testing.T) {
@@ -191,6 +233,26 @@ func TestCombatChoiceDetailsExplainStatusEffects(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "Hit chance is lower against targets with higher Stability.") {
 		t.Fatalf("expected stability explanation in hostile ability details, got:\n%s", rendered)
+	}
+}
+
+func TestDelayDetailsExplainSkippedTurn(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	details := abilityDetails(game.Ability{EffectID: "delay", ModifierID: "single"}, reg)
+	if details == nil {
+		t.Fatalf("expected details for delay ability")
+	}
+
+	rendered := strings.Join(details.Lines, "\n")
+	if !strings.Contains(rendered, "Base accuracy: 60%") {
+		t.Fatalf("expected delay accuracy update in details, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "applies Delayed for 1 turn (skips next turn)") {
+		t.Fatalf("expected delay details to explain skipped turn, got:\n%s", rendered)
 	}
 }
 
@@ -238,7 +300,7 @@ func TestInspectSceneIncludesStatGlossary(t *testing.T) {
 	if !strings.Contains(rendered, "Status reference:") {
 		t.Fatalf("expected inspect scene to include status reference, got:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "Corrupted: -10 accuracy") {
+	if !strings.Contains(rendered, "Corrupted: -10 accuracy") || !strings.Contains(rendered, "Delayed: skips next turn") {
 		t.Fatalf("expected inspect scene to explain core status effects, got:\n%s", rendered)
 	}
 }
@@ -281,7 +343,43 @@ func TestInspectSceneExplainsTraitsAndActiveStatuses(t *testing.T) {
 	if !strings.Contains(rendered, "Trait: Overclocked - +4 speed, -3 stability") {
 		t.Fatalf("expected inspect scene to explain enemy trait mechanics, got:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "Leaking(3): 3 damage at end of turn") || !strings.Contains(rendered, "Delayed(1): -4 speed") {
+	if !strings.Contains(rendered, "Leaking(3): 3 damage at end of turn") || !strings.Contains(rendered, "Delayed(1): skips next turn") {
 		t.Fatalf("expected inspect scene to explain enemy active statuses, got:\n%s", rendered)
+	}
+}
+
+func TestMaintenanceSceneAndRotateSelectionState(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	store := meta.NewStore(t.TempDir() + "/meta.json")
+	session := NewSession(reg, store, state, 123, true)
+	session.engine.Run.Roster = []game.Daemon{
+		{ID: "a", Name: "Firewall", ArchetypeID: "firewall", MaxIntegrity: 48, Integrity: 48, Speed: 8, Stability: 12, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{}},
+	}
+	session.engine.Run.ActiveIndex = 0
+	session.engine.Run.Phase = game.PhaseMaintenance
+
+	scene := session.Snapshot()
+	if scene.Kind != string(game.PhaseMaintenance) {
+		t.Fatalf("expected maintenance scene, got %q", scene.Kind)
+	}
+	if len(scene.Choices) < 3 || scene.Choices[2].Enabled {
+		t.Fatalf("expected rotate to be disabled without a reserve daemon, got %+v", scene.Choices)
+	}
+
+	session.engine.Run.Roster = append(session.engine.Run.Roster, game.Daemon{ID: "b", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 42, Speed: 15, Stability: 9, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "single"}}, TraitID: "persistent", Statuses: map[string]int{}})
+	if _, _, err := session.Apply("maintenance:rotate"); err != nil {
+		t.Fatalf("maintenance rotate failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseSelectActive) || scene.Title != "Rotate Lead" {
+		t.Fatalf("expected rotate to route to select active, got %+v", scene)
+	}
+	if scene.Choices[0].Enabled {
+		t.Fatalf("expected current active daemon to be disabled during rotate, got %+v", scene.Choices)
 	}
 }

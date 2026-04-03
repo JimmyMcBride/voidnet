@@ -3,11 +3,23 @@ package audio
 import "testing"
 
 func TestGenerateEventSFX(t *testing.T) {
-	samples, sr, err := GenerateEventSFX(EventDaemonCaptured, 55)
-	if err != nil {
-		t.Fatalf("generate event sfx: %v", err)
+	events := []Event{
+		EventDaemonCaptured,
+		EventPatchRestore,
+		EventBackfire,
+		EventCrash,
+		EventUnlock,
+		EventRunVictory,
+		EventRunDefeat,
 	}
-	if sr <= 0 || len(samples) == 0 {
-		t.Fatalf("unexpected output sr=%d samples=%d", sr, len(samples))
+
+	for i, event := range events {
+		samples, sr, err := GenerateEventSFX(event, int64(55+i))
+		if err != nil {
+			t.Fatalf("generate event sfx for %s: %v", event, err)
+		}
+		if sr <= 0 || len(samples) == 0 {
+			t.Fatalf("unexpected output for %s sr=%d samples=%d", event, sr, len(samples))
+		}
 	}
 }

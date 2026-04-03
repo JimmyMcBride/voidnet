@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strconv"
 	"strings"
@@ -42,6 +43,8 @@ const (
 
 type model struct {
 	session             *app.Session
+	audio               audio.Runtime
+	audioCounter        uint64
 	scene               app.Scene
 	selectedIndex       int
 	width               int
@@ -76,6 +79,7 @@ type playbackBeat struct {
 	applyScene bool
 	phase      string
 	phaseStyle string
+	cue        audio.Event
 }
 
 type playbackTickMsg struct{}
@@ -92,7 +96,8 @@ func Run(session *app.Session) (err error) {
 		}()
 	}
 
-	m := newModel(session)
+	m := newModelWithAudio(session, audioRuntime)
+	m.playCue(audio.EventSystemBoot)
 	program := tea.NewProgram(
 		m,
 		tea.WithInput(os.Stdin),
@@ -103,6 +108,10 @@ func Run(session *app.Session) (err error) {
 }
 
 func newModel(session *app.Session) model {
+	return newModelWithAudio(session, audio.NewNoopRuntime())
+}
+
+func newModelWithAudio(session *app.Session, audioRuntime audio.Runtime) model {
 	playerBar := progress.New(
 		progress.WithFillCharacters('=', '-'),
 		progress.WithSpringOptions(18, 0.92),
@@ -120,6 +129,7 @@ func newModel(session *app.Session) model {
 
 	m := model{
 		session:             session,
+		audio:               audioRuntime,
 		scene:               session.Snapshot(),
 		width:               defaultPanelWidth + 4,
 		playerBar:           playerBar,
@@ -156,6 +166,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case tea.KeyPressMsg:
+		if msg.String() == "m" {
+			m.toggleAudio()
+			break
+		}
 		if m.activeModal != nil {
 			switch msg.String() {
 			case "i", "esc", "q":
@@ -231,6 +245,7 @@ func (m *model) applyChoice(choiceID string) []tea.Cmd {
 		return nil
 	}
 	m.lastError = ""
+	m.playSelectCue(choiceID, previous, scene, events)
 
 	cmds := m.handleSceneTransition(previous, scene, events, choiceID)
 	if m.session.ShouldQuit() {
@@ -240,7 +255,6 @@ func (m *model) applyChoice(choiceID string) []tea.Cmd {
 }
 
 func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events []app.Event, choiceID string) []tea.Cmd {
-	lines := eventMessages(events)
 	cmds := []tea.Cmd{}
 	m.activeModal = nil
 
@@ -251,8 +265,9 @@ func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events
 		m.selectedIndex = clampSelection(0, m.scene)
 		m.syncBarWidth()
 		cmds = append(cmds, m.syncBars())
-		if len(lines) > 0 {
-			cmds = append(cmds, m.beginPlayback(next, buildPreludeBeats(lines)))
+		m.playCue(m.sceneEntryCue(previous, next, events))
+		if len(events) > 0 {
+			cmds = append(cmds, m.beginPlayback(next, buildPreludeBeats(events)))
 			return cmds
 		}
 		if cmd := m.maybeAdvanceEnemy(); cmd != nil {
@@ -260,8 +275,8 @@ func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events
 		}
 		return cmds
 	case isCombatChoice(choiceID, previous):
-		if len(lines) > 0 {
-			cmds = append(cmds, m.beginPlayback(next, buildActionBeats(actorFromScene(previous), previous, lines)))
+		if len(events) > 0 {
+			cmds = append(cmds, m.beginPlayback(next, buildActionBeats(actorFromScene(previous), previous, events)))
 			return cmds
 		}
 		m.scene = next
@@ -277,6 +292,8 @@ func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events
 		m.selectedIndex = clampSelection(0, m.scene)
 		m.syncBarWidth()
 		cmds = append(cmds, m.syncBars())
+		m.playEventCues(events)
+		m.playCue(m.sceneEntryCue(previous, next, events))
 		if !retainsCombatLog(next) {
 			m.clearCombatLog()
 		}
@@ -309,12 +326,14 @@ func (m *model) advancePlayback() tea.Cmd {
 		return nil
 	}
 	if m.playback.index >= len(m.playback.beats) {
+		resolved := m.playback.resolvedScene
 		m.playback = nil
 		m.playbackLines = nil
 		m.playbackActor = ""
 		m.playbackImpact = false
 		m.playbackPhase = ""
 		m.playbackPhaseStyle = ""
+		m.playCue(m.sceneEntryCue(app.Scene{Kind: "combat"}, resolved, nil))
 		if cmd := m.maybeAdvanceEnemy(); cmd != nil {
 			return cmd
 		}
@@ -332,6 +351,7 @@ func (m *model) advancePlayback() tea.Cmd {
 	m.playbackPhase = beat.phase
 	m.playbackPhaseStyle = beat.phaseStyle
 	m.appendCombatLog(beat.lines)
+	m.playCue(beat.cue)
 
 	cmds := []tea.Cmd{}
 	if beat.applyScene {
@@ -363,13 +383,16 @@ func (m *model) fastForwardPlayback() tea.Cmd {
 		m.syncBarWidth()
 	}
 
+	remainingBeats := remainingPlaybackBeats(m.playback)
 	m.appendCombatLog(remainingPlaybackLines(m.playback))
+	m.playCue(dominantPlaybackCue(remainingBeats))
 	m.playback = nil
 	m.playbackLines = nil
 	m.playbackActor = ""
 	m.playbackImpact = false
 	m.playbackPhase = ""
 	m.playbackPhaseStyle = ""
+	m.playCue(m.sceneEntryCue(app.Scene{Kind: "combat"}, m.scene, nil))
 
 	cmds := []tea.Cmd{}
 	if applyScene {
@@ -399,14 +422,112 @@ func (m *model) maybeAdvanceEnemy() tea.Cmd {
 }
 
 func (m *model) handleEnemyAdvance(previous app.Scene, next app.Scene, events []app.Event) []tea.Cmd {
-	lines := eventMessages(events)
-	if len(lines) == 0 {
+	if len(events) == 0 {
 		m.scene = next
 		m.selectedIndex = clampSelection(0, m.scene)
 		m.syncBarWidth()
+		m.playCue(m.sceneEntryCue(previous, next, events))
 		return []tea.Cmd{m.syncBars()}
 	}
-	return []tea.Cmd{m.beginPlayback(next, buildActionBeats(actorEnemy, previous, lines))}
+	return []tea.Cmd{m.beginPlayback(next, buildActionBeats(actorEnemy, previous, events))}
+}
+
+func (m *model) playCue(event audio.Event) {
+	if m.audio == nil || event == "" {
+		return
+	}
+	m.audioCounter++
+	m.audio.Play(event, m.audioSeed(event))
+}
+
+func (m model) audioSeed(event audio.Event) int64 {
+	base := uint64(m.session.Seed())
+	return int64(base ^ m.audioCounter ^ hashAudioEvent(event))
+}
+
+func hashAudioEvent(event audio.Event) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(event))
+	return h.Sum64()
+}
+
+func (m *model) toggleAudio() {
+	if m.audio == nil || !m.audio.Available() {
+		return
+	}
+	m.audio.SetMuted(!m.audio.Muted())
+}
+
+func (m model) audioStatus() string {
+	if m.audio == nil || !m.audio.Available() {
+		return "audio=unavailable"
+	}
+	if m.audio.Muted() {
+		return "audio=muted"
+	}
+	return "audio=on"
+}
+
+func (m *model) playEventCues(events []app.Event) {
+	for _, event := range events {
+		m.playCue(event.Cue)
+	}
+}
+
+func (m *model) playSelectCue(choiceID string, previous app.Scene, next app.Scene, events []app.Event) {
+	if shouldPlaySelectCue(choiceID, previous, next, events) {
+		m.playCue(audio.EventSelect)
+	}
+}
+
+func shouldPlaySelectCue(choiceID string, previous app.Scene, next app.Scene, events []app.Event) bool {
+	if choiceID == "quit" || choiceID == "" || len(events) == 0 {
+		return false
+	}
+	if strings.HasPrefix(choiceID, "ability:") || choiceID == "isolate" || choiceID == "node:" || choiceID == "inspect" {
+		return false
+	}
+	if next.Kind == "starter_select" {
+		return false
+	}
+	return true
+}
+
+func (m model) sceneEntryCue(previous app.Scene, next app.Scene, events []app.Event) audio.Event {
+	switch next.Kind {
+	case "reward":
+		if hasUnlockLine(next.Lines) {
+			return audio.EventUnlock
+		}
+		return audio.EventLevelClear
+	case "select_active":
+		if next.Title == "Select Active Daemon" {
+			return audio.EventAlert
+		}
+		return ""
+	case "game_over":
+		if len(next.Lines) > 0 && next.Lines[0] == "Run won." {
+			return audio.EventRunVictory
+		}
+		return ""
+	case "combat":
+		if !isCombatEntry(previous, next) {
+			return ""
+		}
+		if next.Combat != nil && strings.EqualFold(next.Combat.NodeType, "Boss") {
+			return audio.EventAlert
+		}
+	}
+	return ""
+}
+
+func hasUnlockLine(lines []string) bool {
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Unlocked ") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *model) syncBarWidth() {
@@ -592,12 +713,10 @@ func (m model) combatLayoutMetrics(width int) combatLayoutMetrics {
 	if menuBody < 1 {
 		menuBody = 1
 	}
-
-	preferredLogBody := max(5, min(10, wrappedLineCount(m.combatLogRows(width), width)+1))
 	if m.height <= 0 {
 		return combatLayoutMetrics{
 			encounterBody: encounterBody,
-			logBody:       preferredLogBody,
+			logBody:       8,
 			wide:          wide,
 		}
 	}
@@ -621,9 +740,9 @@ func (m model) combatLayoutMetrics(width int) combatLayoutMetrics {
 		}
 	}
 
-	logBody := preferredLogBody
-	if encounterBody+logBody > availableBody {
-		logBody = max(1, availableBody-encounterBody)
+	logBody := max(1, availableBody-encounterBody)
+	if logBody < 4 && availableBody > 4 {
+		logBody = min(4, availableBody)
 	}
 	return combatLayoutMetrics{
 		encounterBody: encounterBody,
@@ -1450,16 +1569,20 @@ func stylizeSignedTerm(part string) string {
 }
 
 func (m model) controlsHint() string {
+	audioHint := " | m toggle | " + m.audioStatus()
+	if m.audio == nil || !m.audio.Available() {
+		audioHint = " | " + m.audioStatus()
+	}
 	if m.activeModal != nil {
-		return fmt.Sprintf("controls: i/esc/q close detail | scene=%s", m.scene.Kind)
+		return fmt.Sprintf("controls: i/esc/q close detail%s | scene=%s", audioHint, m.scene.Kind)
 	}
 	if m.playback != nil {
-		return fmt.Sprintf("controls: gg/G/ctrl+u/ctrl+d log | space fast-forward | q quit | scene=%s", m.scene.Kind)
+		return fmt.Sprintf("controls: gg/G/ctrl+u/ctrl+d log | space fast-forward | q quit%s | scene=%s", audioHint, m.scene.Kind)
 	}
 	if m.scene.Combat != nil {
-		return fmt.Sprintf("controls: j/k menu | i detail | gg/G/ctrl+u/ctrl+d log | enter select | q quit | scene=%s", m.scene.Kind)
+		return fmt.Sprintf("controls: j/k menu | i detail | gg/G/ctrl+u/ctrl+d log | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
 	}
-	return fmt.Sprintf("controls: up/down or j/k | enter select | q quit | scene=%s", m.scene.Kind)
+	return fmt.Sprintf("controls: up/down or j/k | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
 }
 
 func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool) string {
@@ -1614,22 +1737,23 @@ func actorFromCombatView(combat *app.CombatView) string {
 	return actorEnemy
 }
 
-func buildPreludeBeats(lines []string) []playbackBeat {
-	beats := make([]playbackBeat, 0, len(lines))
-	for _, line := range lines {
+func buildPreludeBeats(events []app.Event) []playbackBeat {
+	beats := make([]playbackBeat, 0, len(events))
+	for _, event := range events {
 		beats = append(beats, playbackBeat{
-			lines:      []string{line},
+			lines:      []string{event.Message},
 			delay:      playbackIntroDelay,
 			phase:      "LINK ESTABLISHED",
 			phaseStyle: ansiBold + ansiCyan,
+			cue:        event.Cue,
 		})
 	}
 	return beats
 }
 
-func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackBeat {
+func buildActionBeats(actor string, scene app.Scene, events []app.Event) []playbackBeat {
 	if actor == "" {
-		return buildPreludeBeats(lines)
+		return buildPreludeBeats(events)
 	}
 
 	beats := []playbackBeat{{
@@ -1638,10 +1762,12 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 		actor:      actor,
 		phase:      playbackTurnPhase(actor),
 		phaseStyle: playbackActorStyle(actor),
+		cue:        turnBannerCue(actor),
 	}}
-	if len(lines) == 0 {
+	if len(events) == 0 {
 		return beats
 	}
+	lines := eventMessages(events)
 
 	if len(lines) == 1 {
 		beats = append(beats, playbackBeat{
@@ -1652,6 +1778,7 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 			applyScene: true,
 			phase:      "PAYLOAD LANDED",
 			phaseStyle: ansiBold + ansiYellow,
+			cue:        dominantEventCue(events),
 		})
 		return beats
 	}
@@ -1662,6 +1789,7 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 		actor:      actor,
 		phase:      "ABILITY PRIMED",
 		phaseStyle: playbackActorStyle(actor),
+		cue:        actionAnnounceCue(actor),
 	})
 
 	index := 1
@@ -1685,6 +1813,7 @@ func buildActionBeats(actor string, scene app.Scene, lines []string) []playbackB
 			applyScene: true,
 			phase:      "PAYLOAD LANDED",
 			phaseStyle: ansiBold + ansiYellow,
+			cue:        dominantEventCue(events[index:]),
 		})
 		return beats
 	}
@@ -1720,6 +1849,20 @@ func playbackActorStyle(actor string) string {
 	}
 }
 
+func turnBannerCue(actor string) audio.Event {
+	if actor == actorEnemy {
+		return audio.EventAlert
+	}
+	return ""
+}
+
+func actionAnnounceCue(actor string) audio.Event {
+	if actor == actorPlayer {
+		return audio.EventHackStart
+	}
+	return ""
+}
+
 func turnBanner(actor string, scene app.Scene) string {
 	switch actor {
 	case actorEnemy:
@@ -1735,7 +1878,7 @@ func turnBanner(actor string, scene app.Scene) string {
 }
 
 func isRollLine(line string) bool {
-	return strings.HasPrefix(line, "Success chance ")
+	return strings.HasPrefix(line, "Success chance ") || strings.HasPrefix(line, "Isolation chance ")
 }
 
 func retainsCombatLog(scene app.Scene) bool {
@@ -1751,6 +1894,62 @@ func remainingPlaybackLines(playback *playbackSequence) []string {
 		lines = append(lines, playback.beats[i].lines...)
 	}
 	return lines
+}
+
+func remainingPlaybackBeats(playback *playbackSequence) []playbackBeat {
+	if playback == nil || playback.index >= len(playback.beats) {
+		return nil
+	}
+	return append([]playbackBeat(nil), playback.beats[playback.index:]...)
+}
+
+func dominantPlaybackCue(beats []playbackBeat) audio.Event {
+	best := audio.Event("")
+	bestPriority := 0
+	for _, beat := range beats {
+		priority := cuePriority(beat.cue)
+		if priority > bestPriority {
+			best = beat.cue
+			bestPriority = priority
+		}
+	}
+	return best
+}
+
+func dominantEventCue(events []app.Event) audio.Event {
+	best := audio.Event("")
+	bestPriority := 0
+	for _, event := range events {
+		priority := cuePriority(event.Cue)
+		if priority > bestPriority {
+			best = event.Cue
+			bestPriority = priority
+		}
+	}
+	return best
+}
+
+func cuePriority(event audio.Event) int {
+	switch event {
+	case audio.EventDaemonCaptured:
+		return 8
+	case audio.EventCrash:
+		return 7
+	case audio.EventBackfire:
+		return 6
+	case audio.EventPatchRestore:
+		return 5
+	case audio.EventCorruptionBurst:
+		return 4
+	case audio.EventGlitchStinger:
+		return 3
+	case audio.EventHackSuccess:
+		return 2
+	case audio.EventHackFail:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func renderNodeMap(view app.NodeMapView, focusedID string) []string {

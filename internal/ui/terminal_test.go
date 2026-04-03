@@ -8,11 +8,45 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"voidnet/internal/app"
+	"voidnet/internal/audio"
 	"voidnet/internal/content"
 	"voidnet/internal/meta"
 )
 
+type fakeAudioRuntime struct {
+	played    []audio.Event
+	muted     bool
+	available bool
+}
+
+func (f *fakeAudioRuntime) Play(event audio.Event, seed int64) {
+	if f.muted || event == "" {
+		return
+	}
+	f.played = append(f.played, event)
+}
+
+func (f *fakeAudioRuntime) SetMuted(muted bool) {
+	f.muted = muted
+}
+
+func (f *fakeAudioRuntime) Muted() bool {
+	return f.muted
+}
+
+func (f *fakeAudioRuntime) Available() bool {
+	return f.available
+}
+
+func (f *fakeAudioRuntime) Close() error {
+	return nil
+}
+
 func newCombatTestModel(t *testing.T, seed int64) model {
+	return newCombatTestModelWithAudio(t, seed, audio.NewNoopRuntime())
+}
+
+func newCombatTestModelWithAudio(t *testing.T, seed int64, audioRuntime audio.Runtime) model {
 	t.Helper()
 
 	reg, err := content.Load()
@@ -22,7 +56,7 @@ func newCombatTestModel(t *testing.T, seed int64) model {
 
 	state := meta.DefaultState()
 	session := app.NewSession(reg, meta.NewStore(""), state, seed, true)
-	model := newModel(session)
+	model := newModelWithAudio(session, audioRuntime)
 	model.width = 100
 	model.height = 40
 	model.syncBarWidth()
@@ -38,6 +72,15 @@ func settleCombatPlayback(m *model) {
 	for m.playback != nil {
 		_ = m.fastForwardPlayback()
 	}
+}
+
+func containsAudioEvent(events []audio.Event, target audio.Event) bool {
+	for _, event := range events {
+		if event == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestApplyChoiceResetsSelectionToFirstOption(t *testing.T) {
@@ -67,24 +110,33 @@ func TestApplyChoiceResetsSelectionToFirstOption(t *testing.T) {
 }
 
 func TestPlaybackBeatTimingUsesModerateProfile(t *testing.T) {
-	prelude := buildPreludeBeats([]string{"Entered signal.root.", "Encountered NullPointer."})
+	prelude := buildPreludeBeats([]app.Event{
+		{Message: "Entered signal.root.", Cue: audio.EventScan},
+		{Message: "Encountered NullPointer.", Cue: audio.EventDaemonAppears},
+	})
 	if len(prelude) != 2 {
 		t.Fatalf("expected 2 prelude beats, got %d", len(prelude))
 	}
 	if prelude[0].delay != playbackIntroDelay || prelude[0].phase != "LINK ESTABLISHED" {
 		t.Fatalf("expected intro beats to use the slower entry timing and phase, got %+v", prelude[0])
 	}
+	if prelude[0].cue != audio.EventScan || prelude[1].cue != audio.EventDaemonAppears {
+		t.Fatalf("expected prelude cues to preserve event routing, got %+v", prelude)
+	}
 
-	beats := buildActionBeats(actorEnemy, app.Scene{Combat: &app.CombatView{Round: 1}}, []string{
-		"Enemy NullPointer used Spike + Single.",
-		"Success chance 66% (base 90, target resistance -10, stability diff -4). Roll 78.",
-		"Your Firewall took 11 damage.",
+	beats := buildActionBeats(actorEnemy, app.Scene{Combat: &app.CombatView{Round: 1}}, []app.Event{
+		{Message: "Enemy NullPointer used Spike + Single."},
+		{Message: "Success chance 66% (base 90, target resistance -10, stability diff -4). Roll 78."},
+		{Message: "Your Firewall took 11 damage.", Cue: audio.EventHackSuccess},
 	})
 	if len(beats) != 4 {
 		t.Fatalf("expected 4 action beats, got %d", len(beats))
 	}
 	if beats[0].delay != playbackTurnDelay || beats[0].phase != "HOSTILE EXECUTION" {
 		t.Fatalf("expected enemy turn beat to use slower turn timing, got %+v", beats[0])
+	}
+	if beats[0].cue != audio.EventAlert {
+		t.Fatalf("expected enemy turn banner to trigger alert cue, got %+v", beats[0])
 	}
 	if beats[1].delay != playbackActionDelay || beats[1].phase != "ABILITY PRIMED" {
 		t.Fatalf("expected action beat timing, got %+v", beats[1])
@@ -94,6 +146,9 @@ func TestPlaybackBeatTimingUsesModerateProfile(t *testing.T) {
 	}
 	if beats[3].delay != playbackImpactDelay || beats[3].phase != "PAYLOAD LANDED" || !beats[3].applyScene {
 		t.Fatalf("expected impact beat timing and scene application, got %+v", beats[3])
+	}
+	if beats[3].cue != audio.EventHackSuccess {
+		t.Fatalf("expected impact beat to carry dominant cue, got %+v", beats[3])
 	}
 }
 
@@ -125,6 +180,7 @@ func TestCombatPlaybackDefersEnemyFirstDamageUntilImpactBeat(t *testing.T) {
 
 	model.advancePlayback()
 	model.advancePlayback()
+	model.advancePlayback()
 	if model.playbackActor != actorEnemy || len(model.playbackLines) == 0 || model.playbackLines[0] != "Enemy turn. Acting first." {
 		t.Fatalf("expected enemy turn banner after entry beats, got actor=%q lines=%+v", model.playbackActor, model.playbackLines)
 	}
@@ -139,13 +195,14 @@ func TestCombatPlaybackDefersEnemyFirstDamageUntilImpactBeat(t *testing.T) {
 	}
 
 	model.advancePlayback()
-	if model.scene.Combat.Player.IntegrityCurrent != 44 {
+	if model.scene.Combat.Player.IntegrityCurrent != 41 {
 		t.Fatalf("expected enemy impact beat to land damage, got %d", model.scene.Combat.Player.IntegrityCurrent)
 	}
 }
 
 func TestFastForwardPlaybackAppliesResolvedEnemySequence(t *testing.T) {
 	model := newCombatTestModel(t, 2)
+	model.advancePlayback()
 	model.advancePlayback()
 	model.advancePlayback()
 
@@ -161,7 +218,7 @@ func TestFastForwardPlaybackAppliesResolvedEnemySequence(t *testing.T) {
 	if model.scene.Combat == nil {
 		t.Fatalf("expected combat to remain active after enemy opener")
 	}
-	if model.scene.Combat.Player.IntegrityCurrent != 44 {
+	if model.scene.Combat.Player.IntegrityCurrent != 41 {
 		t.Fatalf("expected fast-forward to apply resolved enemy damage, got %d", model.scene.Combat.Player.IntegrityCurrent)
 	}
 	if !model.scene.Combat.PlayerTurn {
@@ -178,6 +235,7 @@ func TestCombatEncounterShowsPlaybackPhaseSignal(t *testing.T) {
 		t.Fatalf("expected entry playback phase signal, got:\n%s", rendered)
 	}
 
+	model.advancePlayback()
 	model.advancePlayback()
 	model.advancePlayback()
 	lines = model.renderCombatEncounterLines(model.panelWidth(), true)
@@ -212,11 +270,12 @@ func TestCombatLogAccumulatesDuringPlayback(t *testing.T) {
 
 	model.advancePlayback()
 	model.advancePlayback()
+	model.advancePlayback()
 
-	if len(model.combatLogLines) < 3 {
+	if len(model.combatLogLines) < 4 {
 		t.Fatalf("expected combat log to accumulate revealed beats, got %+v", model.combatLogLines)
 	}
-	if model.combatLogLines[2] != "Enemy turn. Acting first." {
+	if model.combatLogLines[3] != "Enemy turn. Acting first." {
 		t.Fatalf("expected enemy turn banner in combat log, got %+v", model.combatLogLines)
 	}
 }
@@ -296,6 +355,26 @@ func TestCombatLogRowsWrapStyledLinesByVisibleWidth(t *testing.T) {
 		if visibleWidth(row) > 20 {
 			t.Fatalf("expected wrapped row width <= 20, got %d for %q", visibleWidth(row), row)
 		}
+	}
+}
+
+func TestCombatLogCardHeightStaysFixedAsHistoryGrows(t *testing.T) {
+	model := newCombatTestModel(t, 2)
+	model.width = 100
+	model.height = 36
+	model.syncBarWidth()
+
+	initial := model.combatLayoutMetrics(model.panelWidth()).logBody
+	model.combatLogLines = []string{"Entered signal.root."}
+	short := model.combatLayoutMetrics(model.panelWidth()).logBody
+	model.combatLogLines = []string{}
+	for i := 0; i < 40; i++ {
+		model.combatLogLines = append(model.combatLogLines, fmt.Sprintf("log line %02d", i))
+	}
+	long := model.combatLayoutMetrics(model.panelWidth()).logBody
+
+	if initial != short || short != long {
+		t.Fatalf("expected combat log card height to stay fixed, got initial=%d short=%d long=%d", initial, short, long)
 	}
 }
 
@@ -418,14 +497,147 @@ func TestSpaceFastForwardsCombatPlaybackOnly(t *testing.T) {
 	m := newCombatTestModel(t, 2)
 	m.advancePlayback()
 	m.advancePlayback()
+	m.advancePlayback()
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	next := updated.(model)
 	if next.playback != nil {
 		t.Fatalf("expected space to fast-forward the active enemy sequence")
 	}
-	if next.scene.Combat == nil || next.scene.Combat.Player.IntegrityCurrent != 44 {
+	if next.scene.Combat == nil || next.scene.Combat.Player.IntegrityCurrent != 41 {
 		t.Fatalf("expected space fast-forward to apply enemy impact, got %+v", next.scene.Combat)
+	}
+}
+
+func TestToggleAudioMuteState(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
+	audioRuntime := &fakeAudioRuntime{available: true}
+	m := newModelWithAudio(session, audioRuntime)
+
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "m"})
+	next := updated.(model)
+	if !next.audio.Muted() {
+		t.Fatalf("expected m to mute runtime")
+	}
+
+	updated, _ = next.Update(tea.KeyPressMsg{Text: "m"})
+	next = updated.(model)
+	if next.audio.Muted() {
+		t.Fatalf("expected second m to unmute runtime")
+	}
+}
+
+func TestNodeEntryPlaybackUsesScanAndEncounterCues(t *testing.T) {
+	audioRuntime := &fakeAudioRuntime{available: true}
+	m := newCombatTestModelWithAudio(t, 2, audioRuntime)
+	m.advancePlayback()
+	m.advancePlayback()
+
+	if len(audioRuntime.played) < 5 {
+		t.Fatalf("expected combat entry playback to emit scan and encounter cues, got %+v", audioRuntime.played)
+	}
+	if !containsAudioEvent(audioRuntime.played, audio.EventScan) || !containsAudioEvent(audioRuntime.played, audio.EventDaemonAppears) || !containsAudioEvent(audioRuntime.played, audio.EventPatchRestore) {
+		t.Fatalf("expected node entry to include scan, reveal, and starter fortify cues, got %+v", audioRuntime.played)
+	}
+}
+
+func TestCombatPlaybackUsesTurnAndImpactCues(t *testing.T) {
+	audioRuntime := &fakeAudioRuntime{available: true}
+	m := newCombatTestModelWithAudio(t, 2, audioRuntime)
+
+	for m.playback != nil {
+		_ = m.advancePlayback()
+	}
+
+	if len(audioRuntime.played) < 4 {
+		t.Fatalf("expected combat playback cues, got %+v", audioRuntime.played)
+	}
+	if !containsAudioEvent(audioRuntime.played, audio.EventDaemonAppears) {
+		t.Fatalf("expected encounter reveal cue during prelude, got %+v", audioRuntime.played)
+	}
+	if !containsAudioEvent(audioRuntime.played, audio.EventAlert) {
+		t.Fatalf("expected enemy turn banner alert cue, got %+v", audioRuntime.played)
+	}
+	if audioRuntime.played[len(audioRuntime.played)-1] != audio.EventHackSuccess {
+		t.Fatalf("expected impact cue to land on damage result, got %+v", audioRuntime.played)
+	}
+}
+
+func TestFastForwardPlaybackStillPlaysDominantRemainingCue(t *testing.T) {
+	audioRuntime := &fakeAudioRuntime{available: true}
+	m := newCombatTestModelWithAudio(t, 2, audioRuntime)
+	m.advancePlayback()
+	m.advancePlayback()
+	m.advancePlayback()
+
+	before := len(audioRuntime.played)
+	_ = m.fastForwardPlayback()
+
+	if len(audioRuntime.played) != before+1 {
+		t.Fatalf("expected fast-forward to emit one dominant cue, got %+v", audioRuntime.played)
+	}
+	if audioRuntime.played[len(audioRuntime.played)-1] != audio.EventHackSuccess {
+		t.Fatalf("expected fast-forward to preserve impact cue, got %+v", audioRuntime.played)
+	}
+}
+
+func TestRewardAndGameOverSceneEntryCues(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
+	audioRuntime := &fakeAudioRuntime{available: true}
+	m := newModelWithAudio(session, audioRuntime)
+
+	m.handleSceneTransition(app.Scene{}, app.Scene{Kind: "reward", Lines: []string{"Unlocked starter: Scheduler."}}, nil, "continue")
+	if got := audioRuntime.played[len(audioRuntime.played)-1]; got != audio.EventUnlock {
+		t.Fatalf("expected unlock reward cue, got %+v", audioRuntime.played)
+	}
+
+	m.handleSceneTransition(app.Scene{}, app.Scene{Kind: "reward", Lines: []string{"Node complete."}}, nil, "continue")
+	if got := audioRuntime.played[len(audioRuntime.played)-1]; got != audio.EventLevelClear {
+		t.Fatalf("expected level clear cue, got %+v", audioRuntime.played)
+	}
+
+	m.handleSceneTransition(app.Scene{}, app.Scene{Kind: "game_over", Lines: []string{"Run won."}}, nil, "continue")
+	if got := audioRuntime.played[len(audioRuntime.played)-1]; got != audio.EventRunVictory {
+		t.Fatalf("expected run victory cue, got %+v", audioRuntime.played)
+	}
+
+	before := len(audioRuntime.played)
+	m.handleSceneTransition(app.Scene{}, app.Scene{Kind: "game_over", Lines: []string{"Run failed."}}, nil, "continue")
+	if len(audioRuntime.played) != before {
+		t.Fatalf("expected run defeat to avoid a duplicate scene-entry cue, got %+v", audioRuntime.played)
+	}
+}
+
+func TestMenuNavigationRemainsSilent(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
+	audioRuntime := &fakeAudioRuntime{available: true}
+	m := newModelWithAudio(session, audioRuntime)
+
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "j"})
+	next := updated.(model)
+	if len(audioRuntime.played) != 0 {
+		t.Fatalf("expected menu navigation to stay silent, got %+v", audioRuntime.played)
+	}
+	if next.selectedIndex == m.selectedIndex {
+		t.Fatalf("expected navigation to still move the selection")
 	}
 }
 
@@ -437,12 +649,12 @@ func TestControlsHintReflectsSpacePlaybackAndEnterSelect(t *testing.T) {
 
 	state := meta.DefaultState()
 	session := app.NewSession(reg, meta.NewStore(""), state, 12345, true)
-	m := newModel(session)
-	if hint := m.controlsHint(); !strings.Contains(hint, "enter select") || strings.Contains(hint, "space select") {
+	m := newModelWithAudio(session, &fakeAudioRuntime{available: true})
+	if hint := m.controlsHint(); !strings.Contains(hint, "enter select") || strings.Contains(hint, "space select") || !strings.Contains(hint, "m toggle") || !strings.Contains(hint, "audio=on") {
 		t.Fatalf("expected non-combat hint to advertise enter-only selection, got %q", hint)
 	}
 
-	combatModel := newCombatTestModel(t, 2)
+	combatModel := newCombatTestModelWithAudio(t, 2, &fakeAudioRuntime{available: true})
 	if hint := combatModel.controlsHint(); !strings.Contains(hint, "space fast-forward") {
 		t.Fatalf("expected playback hint to advertise space fast-forward, got %q", hint)
 	}

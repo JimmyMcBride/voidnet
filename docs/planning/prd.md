@@ -24,6 +24,7 @@ Start Run
 → Battle
 → Capture (optional)
 → Reward (if survive)
+→ Maintenance
 → Next Node
 → Boss
 → Win or Die → Reset
@@ -37,8 +38,9 @@ Start Run
 
 * No free-text commands
 * Menu-driven selection only
-* Arrow keys + enter (or numeric selection)
+* Arrow keys + enter
 * Always-valid inputs (no user errors possible)
+* Runtime SFX should reinforce key actions and be muteable with `m`
 
 ---
 
@@ -158,7 +160,7 @@ Each = **Effect + Modifier**
 ```text
 1. Select archetype
 2. Assign stat ranges
-3. Generate 2 abilities
+3. Assign fixed core attack + archetype move
 4. Assign 1 trait
 ```
 
@@ -187,8 +189,15 @@ Each = **Effect + Modifier**
 
 * Corrupted → lower success rate
 * Leaking → damage over time
-* Delayed → slower next turn
+* Delayed → skip next turn
 * Stabilized → resist effects
+
+### Between-Fight Management
+
+* After surviving a non-boss node, choose one maintenance action
+* Repair Active
+* Fortify Link
+* Rotate Lead
 
 ---
 

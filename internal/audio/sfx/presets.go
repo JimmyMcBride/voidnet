@@ -127,6 +127,38 @@ func presetParams(preset Preset, seed int64) (Params, error) {
 		base.PhaserRamp = -0.04
 		base.BitCrush = 5
 		base.Volume = 0.9
+	case PresetPatchRestore:
+		base.WaveType = WaveSine
+		base.Duration = 0.18
+		base.BaseFreq = 520 + j(40)
+		base.FreqRamp = 0.08
+		base.SustainTime = 0.08
+		base.DecayTime = 0.08
+		base.SustainPunch = 0.15
+		base.LPFCutoff = 0.85
+		base.Volume = 0.62
+	case PresetBackfire:
+		base.WaveType = WaveNoise
+		base.Duration = 0.16
+		base.BaseFreq = 340 + j(60)
+		base.FreqRamp = -0.12
+		base.DutyCycle = 0.18
+		base.HPFCutoff = 0.22
+		base.BitCrush = 4
+		base.Volume = 0.78
+	case PresetCrash:
+		base.WaveType = WaveSaw
+		base.Duration = 0.34
+		base.BaseFreq = 240 + j(30)
+		base.FreqRamp = -0.18
+		base.FreqDeltaRamp = -0.00005
+		base.SustainTime = 0.12
+		base.DecayTime = 0.22
+		base.HPFCutoff = 0.12
+		base.PhaserOffset = -40
+		base.PhaserRamp = -0.08
+		base.BitCrush = 3
+		base.Volume = 0.84
 	case PresetAlert:
 		base.WaveType = WaveSquare
 		base.Duration = 0.2
@@ -138,17 +170,30 @@ func presetParams(preset Preset, seed int64) (Params, error) {
 		base.HPFCutoff = 0.1
 		base.Volume = 0.7
 	case PresetLevelClear:
+		base.WaveType = WaveSquare
+		base.Duration = 0.32
+		base.BaseFreq = 560 + j(35)
+		base.FreqRamp = 0.075
+		base.FreqDeltaRamp = -0.00002
+		base.DutyCycle = 0.22 + j(0.03)
+		base.SustainTime = 0.12
+		base.DecayTime = 0.16
+		base.SustainPunch = 0.42
+		base.LPFCutoff = 0.88
+		base.HPFCutoff = 0.04
+		base.PhaserOffset = 36 + j(10)
+		base.PhaserRamp = 0.04
+		base.Volume = 0.78
+	case PresetUnlock:
 		base.WaveType = WaveSine
-		base.Duration = 0.4
-		base.BaseFreq = 420 + j(30)
-		base.FreqRamp = 0.035
-		base.FreqDeltaRamp = -0.00001
-		base.SustainTime = 0.22
-		base.DecayTime = 0.18
-		base.SustainPunch = 0.25
-		base.VibratoDepth = 0.02
-		base.VibratoSpeed = 7
-		base.Volume = 0.85
+		base.Duration = 0.22
+		base.BaseFreq = 640 + j(40)
+		base.FreqRamp = 0.09
+		base.SustainTime = 0.08
+		base.DecayTime = 0.12
+		base.SustainPunch = 0.3
+		base.BitCrush = 2
+		base.Volume = 0.7
 	case PresetSystemBoot:
 		base.WaveType = WaveSaw
 		base.Duration = 0.45
@@ -175,6 +220,35 @@ func presetParams(preset Preset, seed int64) (Params, error) {
 		base.PhaserRamp = -0.12
 		base.BitCrush = 6
 		base.Volume = 0.9
+	case PresetRunVictory:
+		base.WaveType = WaveSine
+		base.Duration = 0.72
+		base.BaseFreq = 360 + j(24)
+		base.FreqRamp = 0.11
+		base.FreqDeltaRamp = -0.000015
+		base.AttackTime = 0.01
+		base.SustainTime = 0.34
+		base.DecayTime = 0.26
+		base.SustainPunch = 0.5
+		base.VibratoDepth = 0.05
+		base.VibratoSpeed = 5 + rng.Float64()*2
+		base.LPFCutoff = 0.92
+		base.HPFCutoff = 0.02
+		base.PhaserOffset = 54 + j(12)
+		base.PhaserRamp = 0.05
+		base.BitCrush = 2
+		base.Volume = 0.92
+	case PresetRunDefeat:
+		base.WaveType = WaveSaw
+		base.Duration = 0.42
+		base.BaseFreq = 300 + j(20)
+		base.FreqRamp = -0.12
+		base.FreqDeltaRamp = -0.00004
+		base.SustainTime = 0.14
+		base.DecayTime = 0.24
+		base.HPFCutoff = 0.08
+		base.BitCrush = 3
+		base.Volume = 0.82
 	default:
 		return Params{}, fmt.Errorf("unsupported preset %q", preset)
 	}

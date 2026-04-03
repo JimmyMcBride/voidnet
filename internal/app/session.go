@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"voidnet/internal/audio"
 	"voidnet/internal/content"
 	"voidnet/internal/game"
 	"voidnet/internal/meta"
@@ -27,6 +28,7 @@ type ChoiceDetails struct {
 
 type Event struct {
 	Message string
+	Cue     audio.Event
 }
 
 type Scene struct {
@@ -267,18 +269,42 @@ func (s *Session) Snapshot() Scene {
 			Choices: []Choice{{ID: "continue", Label: "Continue", Enabled: true}, {ID: "quit", Label: "Quit", Enabled: true}},
 		}
 
+	case game.PhaseMaintenance:
+		active := s.engine.ActiveDaemon()
+		lines := []string{
+			"Perform one maintenance action before moving deeper into the network.",
+			fmt.Sprintf("Active daemon: %s", daemonSummary(active.Name, active, s.registry)),
+		}
+		choices := []Choice{
+			{ID: "maintenance:repair", Label: "Repair Active", Enabled: true},
+			{ID: "maintenance:fortify", Label: "Fortify Link", Enabled: true},
+			{ID: "maintenance:rotate", Label: "Rotate Lead", Enabled: len(run.Roster) > 1},
+			{ID: "quit", Label: "Quit", Enabled: true},
+		}
+		if len(run.Roster) <= 1 {
+			choices[2].Label = "Rotate Lead (No reserve daemon)"
+		}
+		return Scene{Kind: string(run.Phase), Title: "Maintenance", Lines: lines, Choices: choices}
+
 	case game.PhaseSelectActive:
+		title := "Select Active Daemon"
 		lines := []string{"Select the next active daemon."}
+		disableCurrent := false
+		if run.SelectActiveMode == game.SelectActiveRotateLead {
+			title = "Rotate Lead"
+			lines = []string{"Select a different daemon to rotate into the lead."}
+			disableCurrent = true
+		}
 		choices := []Choice{}
 		for i, daemon := range run.Roster {
 			choices = append(choices, Choice{
 				ID:      "active:" + strconv.Itoa(i),
 				Label:   daemonSummary(daemon.Name, &daemon, s.registry),
-				Enabled: true,
+				Enabled: !disableCurrent || i != run.ActiveIndex,
 			})
 		}
 		choices = append(choices, Choice{ID: "quit", Label: "Quit", Enabled: true})
-		return Scene{Kind: string(run.Phase), Title: "Select Active Daemon", Lines: lines, Choices: choices}
+		return Scene{Kind: string(run.Phase), Title: title, Lines: lines, Choices: choices}
 
 	case game.PhaseGameOver:
 		result := "Run failed."
@@ -344,6 +370,8 @@ func (s *Session) Apply(choiceID string) (Scene, []Event, error) {
 		}
 	case choiceID == "continue":
 		lines, err = s.engine.Continue()
+	case strings.HasPrefix(choiceID, "maintenance:"):
+		lines, err = s.engine.ChooseMaintenance(strings.TrimPrefix(choiceID, "maintenance:"))
 	case strings.HasPrefix(choiceID, "active:"):
 		index, parseErr := strconv.Atoi(strings.TrimPrefix(choiceID, "active:"))
 		if parseErr != nil {
@@ -380,10 +408,48 @@ func (s *Session) completeAction(lines []string) (Scene, []Event, error) {
 
 	events := make([]Event, 0, len(lines))
 	for _, line := range lines {
-		events = append(events, Event{Message: line})
+		events = append(events, Event{
+			Message: line,
+			Cue:     cueForLine(line),
+		})
 	}
 	s.lastEvents = events
 	return s.Snapshot(), events, nil
+}
+
+func cueForLine(line string) audio.Event {
+	switch {
+	case strings.HasPrefix(line, "Started a new run with seed "):
+		return audio.EventSystemBoot
+	case strings.HasPrefix(line, "Entered "):
+		return audio.EventScan
+	case strings.HasPrefix(line, "Encountered "):
+		return audio.EventDaemonAppears
+	case line == "Inspecting combat state.":
+		return audio.EventScan
+	case line == "Isolation successful.",
+		strings.Contains(line, " joined the roster."),
+		strings.Contains(line, " is ready to join the roster."):
+		return audio.EventDaemonCaptured
+	case strings.HasPrefix(line, "Isolation failed."):
+		return audio.EventHackFail
+	case strings.Contains(line, " backfired for "):
+		return audio.EventBackfire
+	case strings.HasSuffix(line, " crashed.") || line == "Active daemon crashed.":
+		return audio.EventCrash
+	case strings.Contains(line, " restored ") || strings.Contains(line, " gained Stabilized.") || strings.Contains(line, " cleared "):
+		return audio.EventPatchRestore
+	case strings.Contains(line, " is now Corrupted.") || strings.Contains(line, " suffered ") && strings.Contains(line, " from Leaking."):
+		return audio.EventCorruptionBurst
+	case strings.Contains(line, " is now Delayed."):
+		return audio.EventGlitchStinger
+	case strings.Contains(line, " lost the turn to Delayed."):
+		return audio.EventGlitchStinger
+	case strings.Contains(line, " took ") && strings.HasSuffix(line, " damage."):
+		return audio.EventHackSuccess
+	default:
+		return ""
+	}
 }
 
 func (s *Session) ShouldQuit() bool {
@@ -464,14 +530,14 @@ func abilityDetails(ability game.Ability, registry *content.Registry) *ChoiceDet
 	}
 	if effect.Status != "" {
 		status := registry.Statuses[effect.Status]
-		lines = append(lines, fmt.Sprintf("On hit: applies %s for %d turns (%s)", status.Name, effect.StatusDuration, statusEffectSummary(status)))
+		lines = append(lines, fmt.Sprintf("On hit: applies %s for %s (%s)", status.Name, turnsLabel(effect.StatusDuration), statusEffectSummary(status)))
 	}
 	if effect.CleanseNegative {
 		lines = append(lines, "On use: clears one negative status")
 	}
 	if effect.ApplySelfStatus != "" {
 		status := registry.Statuses[effect.ApplySelfStatus]
-		lines = append(lines, fmt.Sprintf("On use: grants %s for %d turns (%s)", status.Name, effect.ApplySelfDuration, statusEffectSummary(status)))
+		lines = append(lines, fmt.Sprintf("On use: grants %s for %s (%s)", status.Name, turnsLabel(effect.ApplySelfDuration), statusEffectSummary(status)))
 	}
 
 	lines = append(lines, "")
@@ -553,6 +619,9 @@ func traitEffectSummary(trait content.TraitDef) string {
 }
 
 func statusEffectSummary(status content.StatusDef) string {
+	if status.ID == "delayed" {
+		return "skips next turn"
+	}
 	parts := []string{}
 	if status.AccuracyDelta != 0 {
 		parts = append(parts, fmt.Sprintf("%+d accuracy", status.AccuracyDelta))
@@ -570,6 +639,13 @@ func statusEffectSummary(status content.StatusDef) string {
 		return "no direct stat change"
 	}
 	return strings.Join(parts, ", ")
+}
+
+func turnsLabel(turns int) string {
+	if turns == 1 {
+		return "1 turn"
+	}
+	return fmt.Sprintf("%d turns", turns)
 }
 
 func activeStatusLines(statuses map[string]int, registry *content.Registry) []string {

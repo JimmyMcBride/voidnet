@@ -43,7 +43,7 @@ A terminal-native RPG where the player acts as an **Operator** infiltrating a co
 ## 3. Core Gameplay Loop
 
 ```text
-Scan → Choose Node → Enter → Encounter → Battle → Capture → Reward → Progress
+Scan → Choose Node → Enter → Encounter → Battle → Capture → Reward → Maintenance → Progress
 ```
 
 Expanded:
