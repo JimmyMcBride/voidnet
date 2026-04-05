@@ -10,12 +10,13 @@ import (
 )
 
 type fakeMusic struct {
-	mutedCalls []bool
-	startCalls []music.LoopID
-	stopCalls  int
-	startErr   error
-	closeErr   error
-	available  bool
+	mutedCalls    []bool
+	startCalls    []music.LoopID
+	reactiveCalls []music.ReactiveState
+	stopCalls     int
+	startErr      error
+	closeErr      error
+	available     bool
 }
 
 func (f *fakeMusic) StartLoop(loop music.LoopID) error {
@@ -25,6 +26,11 @@ func (f *fakeMusic) StartLoop(loop music.LoopID) error {
 
 func (f *fakeMusic) StopLoop() {
 	f.stopCalls++
+}
+
+func (f *fakeMusic) SetReactiveState(state music.ReactiveState) error {
+	f.reactiveCalls = append(f.reactiveCalls, state)
+	return nil
 }
 
 func (f *fakeMusic) SetMuted(v bool) {
@@ -124,6 +130,30 @@ func TestCombinedRuntimeMutePropagatesToMusicAndSFX(t *testing.T) {
 	}
 	if len(mr.mutedCalls) != 1 || !mr.mutedCalls[0] {
 		t.Fatalf("expected music runtime to receive mute state, got %+v", mr.mutedCalls)
+	}
+}
+
+func TestCombinedRuntimeForwardsReactiveMusicState(t *testing.T) {
+	mr := &fakeMusic{available: true}
+	rt := &combinedRuntime{sfx: NewNoopRuntime(), music: mr}
+
+	state := music.ReactiveState{BattleTheme: music.BattleThemeBoss, Intensity: 2}
+	if err := rt.SetMusicReactiveState(state); err != nil {
+		t.Fatalf("set reactive state: %v", err)
+	}
+	if len(mr.reactiveCalls) != 1 || mr.reactiveCalls[0] != state {
+		t.Fatalf("expected reactive state forward, got %+v", mr.reactiveCalls)
+	}
+}
+
+func TestCombinedRuntimeForwardsStopMusicLoop(t *testing.T) {
+	mr := &fakeMusic{available: true}
+	rt := &combinedRuntime{sfx: NewNoopRuntime(), music: mr}
+
+	rt.StopMusicLoop()
+
+	if mr.stopCalls != 1 {
+		t.Fatalf("expected stop loop forward, got %d", mr.stopCalls)
 	}
 }
 

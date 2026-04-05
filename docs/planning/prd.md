@@ -64,10 +64,10 @@ Select Node:
 
 ```text
 Enemy: NullPointer [Corrupted]
-Integrity: 28 | Status: Corrupted
+Health: 28 | Status: Corrupted
 
 Your Daemon: Firewall [Encrypted]
-Integrity: 52
+Health: 52
 
 Choose Action:
 [1] Patch + Single
@@ -103,14 +103,14 @@ Choose Action:
 ### Structure
 
 ```text
-Archetype + Stats + 2 Abilities + 1 Trait
+Archetype + Stats + 2-3 Abilities + 1 Trait + Merge Level
 ```
 
 ---
 
 ### Stats
 
-* **Integrity** (HP)
+* **Health** (HP)
 * **Speed** (turn order)
 * **Stability** (status resistance)
 
@@ -180,6 +180,7 @@ Each = **Effect + Modifier**
 
 * Ability 1
 * Ability 2
+* Ability 3 (merged daemons only)
 * Isolate
 * Inspect
 
@@ -200,7 +201,24 @@ Each = **Effect + Modifier**
 * Repair Daemon and Fortify Daemon each spend 1 maintenance charge
 * After choosing repair or fortify, the player selects which daemon in the roster receives the effect
 * Rotate Lead is free roster management from the node map
+* Merge Daemons is a visible node-map action
+* Merge flow: choose base → choose fork → confirm
+* `+1` merges are free, consume the fork, and give the base daemon a third skill slot
+* Base and fork must be different archetypes, and neither daemon can already be `+1`
 * Players can move between the node map and maintenance console freely before entering the next node
+
+### Merge Outcome (`+1` MVP)
+
+* The base daemon keeps its archetype, trait, and first two abilities
+* The fork contributes its archetype move as slot 3
+* Slot 3 gets a random modifier weighted toward modifiers already present on the fork
+* The base daemon heals for 25% max Health, minimum 8
+* The base daemon gains `+2` in the stat associated with the fork archetype:
+  * Firewall fork → Max Health
+  * MemoryLeaker fork → Stability
+  * NullPointer fork → Speed
+  * Scheduler fork → Speed
+* `+2` merges are out of scope for the current version
 
 ---
 
@@ -242,13 +260,13 @@ Base Chance
 
 ### Eligibility
 
-* Must be ≤ 50% Integrity
+* Must be ≤ 50% Health
 
 ---
 
 ### Base Chances
 
-| Integrity | Chance |
+| Health | Chance |
 | --------- | ------ |
 | 25–50%    | 40%    |
 | ≤25%      | 75%    |

@@ -97,12 +97,12 @@ Expanded:
 ### Structure
 
 ```text
-Archetype + Stats + Abilities (2) + Trait (1)
+Archetype + Stats + Abilities (2-3) + Trait (1) + Merge Level
 ```
 
 ### Stats
 
-* **Integrity** → Health
+* **Health** → durability before a daemon crashes
 * **Speed** → Turn order
 * **Stability** → Status resistance
 
@@ -181,64 +181,42 @@ Generation Flow:
 
 ---
 
-## 6. Merge / Evolution System (Future-Facing)
+## 6. Merge / Evolution System
 
-### Core Idea
+### Current Merge Rule: `+1`
 
-Combine two daemons → produce an evolved daemon
+* Merging is available from the node map
+* Choose a `base` daemon and a `fork` daemon
+* The fork is consumed
+* The base becomes `Name +1`
+* The base keeps:
+  * its archetype
+  * its trait
+  * its first two abilities
+* The fork contributes:
+  * its archetype move as a new slot 3 ability
+  * a random modifier weighted toward the fork's current modifiers
+  * a `+2` stat bonus in the fork archetype's merge-focus stat
+* The merge also restores Health to the base daemon
 
----
+### Constraints
 
-### Inheritance Logic
+* `+1` daemons cannot merge again in the current version
+* Base and fork must be different archetypes
+* Same-archetype merges are not allowed
 
-* Traits have **weights (rarity-based)**
-* Higher rarity → higher chance to inherit
-* Never guaranteed
+### Why It Exists
 
-```text
-Result Trait Pool:
-- Parent A traits (weighted)
-- Parent B traits (weighted)
-- Small chance of mutation trait
-```
+* Gives the player a real macro build choice before adding deeper merge trees
+* Adds a meaningful third ability slot without exploding complexity
+* Reinforces “build something uniquely mine” through visible roster evolution
 
----
+### Deferred / Future
 
-### Risk Layer
-
-* You can **lose rare traits**
-* You can gain unexpected powerful (or bad) traits
-
----
-
-### Player Tension
-
-> “Do I risk this rare trait to progress?”
-
----
-
-### Rare Merge Items
-
-**Purpose:** Controlled override of RNG
-
-Examples:
-
-* **Trait Lock Patch**
-
-  * Guarantees selected trait inheritance
-
-* **Archetype Injector**
-
-  * Forces resulting archetype
-
-* **Stability Clamp**
-
-  * Prevents negative trait outcomes
-
-**Design Rule:**
-
-* Rare → strategic use only
-* Enhances planning, does not remove chaos
+* `+2` merges
+* Trait inheritance
+* Mutation outcomes
+* Rare merge items / override tools
 
 ---
 

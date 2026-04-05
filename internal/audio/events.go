@@ -24,6 +24,8 @@ const (
 	EventGlitchStinger   Event = Event(sfx.PresetGlitchStinger)
 	EventRunVictory      Event = Event(sfx.PresetRunVictory)
 	EventRunDefeat       Event = Event(sfx.PresetRunDefeat)
+	EventLogLine         Event = Event(sfx.PresetLogLine)
+	EventTypingPulse     Event = Event(sfx.PresetTypingPulse)
 )
 
 func GenerateEventSFX(event Event, seed int64) ([]int16, int, error) {

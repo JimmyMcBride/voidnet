@@ -249,6 +249,28 @@ func presetParams(preset Preset, seed int64) (Params, error) {
 		base.HPFCutoff = 0.08
 		base.BitCrush = 3
 		base.Volume = 0.82
+	case PresetLogLine:
+		base.WaveType = WaveSine
+		base.Duration = 0.045
+		base.BaseFreq = 1180 + j(50)
+		base.AttackTime = 0.001
+		base.SustainTime = 0.015
+		base.DecayTime = 0.025
+		base.FreqRamp = -0.015
+		base.LPFCutoff = 0.92
+		base.HPFCutoff = 0.08
+		base.Volume = 0.22
+	case PresetTypingPulse:
+		base.WaveType = WaveSquare
+		base.Duration = 0.018
+		base.BaseFreq = 960 + j(60)
+		base.AttackTime = 0.001
+		base.SustainTime = 0.004
+		base.DecayTime = 0.013
+		base.DutyCycle = 0.18
+		base.HPFCutoff = 0.15
+		base.BitCrush = 2
+		base.Volume = 0.14
 	default:
 		return Params{}, fmt.Errorf("unsupported preset %q", preset)
 	}

@@ -1,11 +1,11 @@
 # Internal Runtime SFX + Music Audio System
 
-Voidnet includes a deterministic SFX generator under `internal/audio/sfx`, a runtime playback layer under `internal/audio`, and a separate looping music subsystem under `internal/audio/music`.
+Voidnet includes a deterministic SFX generator under `internal/audio/sfx`, a runtime playback layer under `internal/audio`, and a looping music subsystem under `internal/audio/music` with theme- and tempo-reactive battle music.
 
 ## SFX runtime vs music runtime
 
 - **SFX runtime** (`internal/audio/sfx`) is deterministic one-shot synthesis for UI/gameplay cues.
-- **Music runtime** (`internal/audio/music`) is a long-lived loop player that renders a procedural pattern once and reuses cached PCM.
+- **Music runtime** (`internal/audio/music`) is a long-lived loop player that renders a procedural pattern once, caches PCM variants, and can swap battle themes plus tempo intensity for combat.
 - The split ensures background music does not serialize or starve one-shot SFX activity.
 
 ## Structure
@@ -19,9 +19,10 @@ Voidnet includes a deterministic SFX generator under `internal/audio/sfx`, a run
 - `internal/audio/sfx/wav.go` — minimal WAV writer for local debugging/auditioning.
 - `internal/audio/music/types.go` — loop, track, and note definitions.
 - `internal/audio/music/patterns.go` — built-in procedural music loop definitions.
+- `internal/audio/music/overlay.go` — battle-theme selection and tempo scaling for reactive combat music.
 - `internal/audio/music/render.go` — deterministic pattern-to-PCM renderer.
 - `internal/audio/music/cache.go` — lazy loop cache to avoid repeat renders.
-- `internal/audio/music/runtime.go` — loop playback runtime + mute/start/stop lifecycle.
+- `internal/audio/music/runtime.go` — loop playback runtime + mute/start/stop lifecycle + reactive state updates.
 - `cmd/sfxdemo/main.go` — local CLI to audition and export generated WAV files.
 
 ## Gameplay usage
@@ -60,8 +61,10 @@ rt.SetMuted(true)
 
 - One-shot SFX playback is queued and serialized for short terminal-native cues.
 - Music loops run through a separate runtime so they do not contend with the SFX queue.
+- The TUI pushes a small reactive music state into the music runtime as scenes change.
+- Battle music selects one of three themes (`standard`, `corrupted`, `boss`) and scales tempo across intensity `0–2`.
 - Runtime audio is enabled by default when available.
-- The TUI exposes a global `m` mute toggle and shows `audio=on`, `audio=muted`, or `audio=unavailable` in the footer.
+- The TUI exposes a global `m` mute toggle.
 - Gameplay systems should emit semantic events such as `EventScan`, `EventDaemonAppears`, or `EventCrash`; the UI/runtime decides when to actually play them.
 
 ## Current semantic events
@@ -85,13 +88,23 @@ rt.SetMuted(true)
 - `RunVictory` — winning the run
 - `RunDefeat` — losing the run
 
-## Music loop v1 capabilities
+## Music loop capabilities
 
-- one built-in procedural loop (`music.LoopBoot`)
+- five built-in procedural loops (`boot`, `ambient`, `battle`, `victory`, `defeat`)
 - deterministic offline render to PCM bytes
 - background looping playback path owned by a dedicated music runtime
 - global mute propagation from the top-level runtime to both SFX and music
 - safe fallback when a host audio backend is unavailable
+- battle loop variants rendered as themed/tempo-adjusted PCM, not a streaming sequencer
+
+## Reactive battle music capabilities
+
+- base scene loop selection still works exactly as before
+- only battle music currently uses reactive state
+- battle state is derived from gameplay-facing scene data:
+  - battle theme: `standard`, `corrupted`, `boss`
+  - intensity: `0` standard tempo, `1` intense, `2` critical
+- battle variants remain deterministic and cacheable
 
 ## Determinism
 
@@ -138,9 +151,10 @@ go run ./cmd/sfxdemo -preset alert -sample-rate 22050 -out ./tmp/alert_22k.wav
 The v1 music runtime is intentionally **not**:
 
 - an adaptive soundtrack engine
-- a sequencer
+- a general-purpose sequencer
 - a stem-switching system
 - a composition/content authoring pipeline
+- a Strudel/Tidal-style DSL
 
 ## Known limits
 
@@ -148,9 +162,11 @@ The v1 music runtime is intentionally **not**:
 - simple note tracks/voices only
 - no dynamic transitions or crossfades
 - overlap details depend on backend player capabilities if separate players are used
+- reactive battle variants are limited to pre-rendered loop variants, not live-scheduled events
 
 ## Notes and tradeoffs
 
 - SFX synthesis remains tuned for short effects, not long ambience or composition.
 - Music is rendered offline then looped, which keeps behavior deterministic and testable.
+- The reactive battle layer deliberately stops short of a real-time pattern engine in order to keep the game shippable.
 - API is internal-first and can evolve if a richer backend/mixer is introduced later.

@@ -7,7 +7,7 @@ func PatternForLoop(id LoopID) (Pattern, bool) {
 	case LoopAmbient:
 		return ambientPattern(), true
 	case LoopBattle:
-		return battlePattern(), true
+		return battleStandardPattern(), true
 	case LoopVictory:
 		return victoryPattern(), true
 	case LoopDefeat:
@@ -112,9 +112,9 @@ func ambientPattern() Pattern {
 	}
 }
 
-// battlePattern plays during combat and the inspect view. Fast, aggressive saw
+// battleStandardPattern plays during standard encounters. Fast, aggressive saw
 // bass with a punching square lead — dark A-minor riff at high BPM.
-func battlePattern() Pattern {
+func battleStandardPattern() Pattern {
 	return Pattern{
 		BPM:          145,
 		BeatsPerLoop: 8,
@@ -175,6 +175,138 @@ func battlePattern() Pattern {
 					{StartBeat: 5.50, Beats: 0.25, MIDI: 74, Velocity: 0.52},
 					{StartBeat: 6.50, Beats: 0.25, MIDI: 72, Velocity: 0.55},
 					{StartBeat: 7.50, Beats: 0.25, MIDI: 69, Velocity: 0.52},
+				},
+			},
+		},
+	}
+}
+
+// battleCorruptedPattern plays during corrupted encounters. It leans harsher
+// and more unstable with a noisier upper register and a more fragmented pulse.
+func battleCorruptedPattern() Pattern {
+	return Pattern{
+		BPM:          138,
+		BeatsPerLoop: 8,
+		SampleRate:   44100,
+		Tracks: []Track{
+			{
+				Waveform: WaveSaw,
+				Gain:     0.30,
+				Notes: []Note{
+					{StartBeat: 0.00, Beats: 0.75, MIDI: 31, Velocity: 0.95},
+					{StartBeat: 1.00, Beats: 0.25, MIDI: 38, Velocity: 0.82},
+					{StartBeat: 1.50, Beats: 0.50, MIDI: 34, Velocity: 0.92},
+					{StartBeat: 2.25, Beats: 0.25, MIDI: 39, Velocity: 0.84},
+					{StartBeat: 3.00, Beats: 0.75, MIDI: 32, Velocity: 0.94},
+					{StartBeat: 4.00, Beats: 0.50, MIDI: 29, Velocity: 0.90},
+					{StartBeat: 5.00, Beats: 0.25, MIDI: 36, Velocity: 0.82},
+					{StartBeat: 5.50, Beats: 0.50, MIDI: 34, Velocity: 0.90},
+					{StartBeat: 6.25, Beats: 0.25, MIDI: 41, Velocity: 0.84},
+					{StartBeat: 7.00, Beats: 0.75, MIDI: 32, Velocity: 0.92},
+				},
+			},
+			{
+				Waveform: WaveSquare,
+				Gain:     0.16,
+				Notes: []Note{
+					{StartBeat: 0.25, Beats: 0.25, MIDI: 69, Velocity: 0.76},
+					{StartBeat: 0.75, Beats: 0.25, MIDI: 72, Velocity: 0.72},
+					{StartBeat: 1.75, Beats: 0.25, MIDI: 76, Velocity: 0.78},
+					{StartBeat: 2.50, Beats: 0.50, MIDI: 67, Velocity: 0.72},
+					{StartBeat: 3.50, Beats: 0.25, MIDI: 74, Velocity: 0.76},
+					{StartBeat: 4.25, Beats: 0.25, MIDI: 69, Velocity: 0.74},
+					{StartBeat: 5.25, Beats: 0.25, MIDI: 72, Velocity: 0.72},
+					{StartBeat: 6.00, Beats: 0.50, MIDI: 77, Velocity: 0.80},
+					{StartBeat: 7.00, Beats: 0.25, MIDI: 74, Velocity: 0.74},
+				},
+			},
+			{
+				Waveform: WaveTriangle,
+				Gain:     0.12,
+				Notes: []Note{
+					{StartBeat: 0.50, Beats: 0.20, MIDI: 81, Velocity: 0.54},
+					{StartBeat: 1.25, Beats: 0.20, MIDI: 78, Velocity: 0.52},
+					{StartBeat: 2.75, Beats: 0.20, MIDI: 84, Velocity: 0.56},
+					{StartBeat: 3.25, Beats: 0.20, MIDI: 79, Velocity: 0.52},
+					{StartBeat: 4.75, Beats: 0.20, MIDI: 83, Velocity: 0.56},
+					{StartBeat: 5.75, Beats: 0.20, MIDI: 80, Velocity: 0.52},
+					{StartBeat: 6.75, Beats: 0.20, MIDI: 86, Velocity: 0.58},
+					{StartBeat: 7.25, Beats: 0.20, MIDI: 82, Velocity: 0.54},
+				},
+			},
+		},
+	}
+}
+
+// battleBossPattern plays during boss encounters. It is more march-like and
+// imposing, with heavier low-end and sustained tension.
+func battleBossPattern() Pattern {
+	return Pattern{
+		BPM:          132,
+		BeatsPerLoop: 8,
+		SampleRate:   44100,
+		Tracks: []Track{
+			// Sub-sine floor — constant dread underneath the march.
+			{
+				Waveform: WaveSine,
+				Gain:     0.18,
+				Notes: []Note{
+					{StartBeat: 0.00, Beats: 2.00, MIDI: 21, Velocity: 0.88}, // A0
+					{StartBeat: 2.00, Beats: 2.00, MIDI: 20, Velocity: 0.86}, // G#0
+					{StartBeat: 4.00, Beats: 2.00, MIDI: 19, Velocity: 0.88}, // G0
+					{StartBeat: 6.00, Beats: 2.00, MIDI: 20, Velocity: 0.86}, // G#0
+				},
+			},
+			// Saw bass — heavy stomp, lower and more punishing than standard.
+			{
+				Waveform: WaveSaw,
+				Gain:     0.34,
+				Notes: []Note{
+					{StartBeat: 0.00, Beats: 0.75, MIDI: 26, Velocity: 0.98}, // D1
+					{StartBeat: 1.00, Beats: 0.40, MIDI: 33, Velocity: 0.86}, // A1
+					{StartBeat: 2.00, Beats: 0.75, MIDI: 24, Velocity: 0.98}, // C1
+					{StartBeat: 3.00, Beats: 0.40, MIDI: 31, Velocity: 0.86}, // G1
+					{StartBeat: 4.00, Beats: 0.75, MIDI: 23, Velocity: 0.98}, // B0
+					{StartBeat: 5.00, Beats: 0.40, MIDI: 30, Velocity: 0.86}, // F#1
+					{StartBeat: 6.00, Beats: 0.75, MIDI: 24, Velocity: 0.98}, // C1
+					{StartBeat: 7.00, Beats: 0.60, MIDI: 35, Velocity: 0.88}, // B1
+				},
+			},
+			// Triangle pressure — sustained harmonic weight with a darker contour.
+			{
+				Waveform: WaveTriangle,
+				Gain:     0.18,
+				Notes: []Note{
+					{StartBeat: 0.50, Beats: 1.25, MIDI: 50, Velocity: 0.68}, // D3
+					{StartBeat: 2.50, Beats: 1.25, MIDI: 46, Velocity: 0.64}, // A#2
+					{StartBeat: 4.50, Beats: 1.25, MIDI: 48, Velocity: 0.68}, // C3
+					{StartBeat: 6.50, Beats: 1.25, MIDI: 45, Velocity: 0.66}, // A2
+				},
+			},
+			// Warning voice — dissonant square siren that reads as danger, not heroics.
+			{
+				Waveform: WaveSquare,
+				Gain:     0.16,
+				Notes: []Note{
+					{StartBeat: 0.25, Beats: 0.18, MIDI: 73, Velocity: 0.74}, // C#5
+					{StartBeat: 1.50, Beats: 0.18, MIDI: 76, Velocity: 0.72}, // E5
+					{StartBeat: 2.25, Beats: 0.18, MIDI: 74, Velocity: 0.74}, // D5
+					{StartBeat: 3.50, Beats: 0.18, MIDI: 78, Velocity: 0.72}, // F#5
+					{StartBeat: 4.25, Beats: 0.18, MIDI: 75, Velocity: 0.74}, // D#5
+					{StartBeat: 5.50, Beats: 0.18, MIDI: 79, Velocity: 0.72}, // G5
+					{StartBeat: 6.25, Beats: 0.18, MIDI: 77, Velocity: 0.76}, // F5
+					{StartBeat: 7.50, Beats: 0.18, MIDI: 80, Velocity: 0.74}, // G#5
+				},
+			},
+			// Siren shimmer — short high stabs to puncture the mix.
+			{
+				Waveform: WaveSaw,
+				Gain:     0.10,
+				Notes: []Note{
+					{StartBeat: 0.75, Beats: 0.12, MIDI: 86, Velocity: 0.58},
+					{StartBeat: 2.75, Beats: 0.12, MIDI: 84, Velocity: 0.56},
+					{StartBeat: 4.75, Beats: 0.12, MIDI: 87, Velocity: 0.60},
+					{StartBeat: 6.75, Beats: 0.12, MIDI: 85, Velocity: 0.58},
 				},
 			},
 		},

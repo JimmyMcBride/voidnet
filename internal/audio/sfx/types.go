@@ -51,6 +51,8 @@ const (
 	PresetGlitchStinger   Preset = "glitch_stinger"
 	PresetRunVictory      Preset = "run_victory"
 	PresetRunDefeat       Preset = "run_defeat"
+	PresetLogLine         Preset = "log_line"
+	PresetTypingPulse     Preset = "typing_pulse"
 )
 
 var allPresets = []Preset{
@@ -73,6 +75,8 @@ var allPresets = []Preset{
 	PresetGlitchStinger,
 	PresetRunVictory,
 	PresetRunDefeat,
+	PresetLogLine,
+	PresetTypingPulse,
 }
 
 func AllPresets() []Preset {

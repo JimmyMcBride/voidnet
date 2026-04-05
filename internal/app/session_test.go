@@ -201,7 +201,7 @@ func TestCueForLineMapsKeyGameplayEvents(t *testing.T) {
 		{"Isolation failed. The daemon resisted the breach.", audio.EventHackFail},
 		{"Single backfired for 4 damage.", audio.EventBackfire},
 		{"Enemy NullPointer crashed.", audio.EventCrash},
-		{"Firewall restored 8 Integrity.", audio.EventPatchRestore},
+		{"Firewall restored 8 Health.", audio.EventPatchRestore},
 		{"Your Firewall is now Corrupted.", audio.EventCorruptionBurst},
 		{"Enemy MemoryLeaker suffered 3 damage from Leaking.", audio.EventCorruptionBurst},
 		{"Enemy Scheduler is now Delayed.", audio.EventGlitchStinger},
@@ -371,14 +371,11 @@ func TestMaintenanceAndNodeMapManagementScenes(t *testing.T) {
 	if !strings.Contains(strings.Join(scene.Lines, "\n"), "Maintenance charge: 0/1 empty.") {
 		t.Fatalf("expected node map scene to show empty maintenance charge, got %+v", scene.Lines)
 	}
-	if len(scene.Choices) < 2 || scene.Choices[len(scene.Choices)-2].Enabled {
-		t.Fatalf("expected rotate to be disabled without a reserve daemon, got %+v", scene.Choices)
+	if len(scene.Choices) != 2 || scene.Choices[0].ID != "merge" || scene.Choices[1].ID != "quit" {
+		t.Fatalf("expected node map scene to show merge and quit only, got %+v", scene.Choices)
 	}
-	if scene.Choices[len(scene.Choices)-3].Details == nil || !strings.Contains(scene.Choices[len(scene.Choices)-3].Details.Preview, "maintenance console") {
-		t.Fatalf("expected maintenance console choice to include details, got %+v", scene.Choices)
-	}
-	if scene.Choices[len(scene.Choices)-2].Details == nil || !strings.Contains(scene.Choices[len(scene.Choices)-2].Details.Preview, "Unavailable") {
-		t.Fatalf("expected disabled rotate choice to explain why it is unavailable, got %+v", scene.Choices[len(scene.Choices)-2])
+	if scene.Choices[0].Enabled {
+		t.Fatalf("expected merge to stay disabled without an eligible pair, got %+v", scene.Choices[0])
 	}
 
 	if _, _, err := session.Apply("view:maintenance"); err != nil {
@@ -453,5 +450,155 @@ func TestMaintenanceAndNodeMapManagementScenes(t *testing.T) {
 	scene = session.Snapshot()
 	if scene.Kind != string(game.PhaseNodeSelect) {
 		t.Fatalf("expected rotate back to return to node select, got %+v", scene)
+	}
+	if !scene.Choices[0].Enabled || scene.Choices[0].ID != "merge" {
+		t.Fatalf("expected merge to become available with a valid pair, got %+v", scene.Choices)
+	}
+}
+
+func TestMergeScenesShowBaseForkAndConfirmFlow(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	store := meta.NewStore(t.TempDir() + "/meta.json")
+	session := NewSession(reg, store, state, 123, true)
+	session.engine.Run.Roster = []game.Daemon{
+		{ID: "a", Name: "Firewall", ArchetypeID: "firewall", MaxIntegrity: 48, Integrity: 40, Speed: 8, Stability: 12, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{}},
+		{ID: "b", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 35, Speed: 15, Stability: 9, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "intensify"}}, TraitID: "persistent", Statuses: map[string]int{}},
+		{ID: "c", Name: "MemoryLeaker", MergeLevel: 1, ArchetypeID: "memoryleaker", MaxIntegrity: 44, Integrity: 44, Speed: 10, Stability: 9, Abilities: []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "leak", ModifierID: "single"}, {EffectID: "patch", ModifierID: "intensify"}}, TraitID: "persistent", Statuses: map[string]int{}},
+	}
+	session.engine.Run.ActiveIndex = 0
+	session.engine.Run.Phase = game.PhaseNodeSelect
+
+	scene := session.Snapshot()
+	if scene.Choices[0].ID != "merge" || !scene.Choices[0].Enabled {
+		t.Fatalf("expected merge to be enabled on node map, got %+v", scene.Choices)
+	}
+
+	if _, _, err := session.Apply("merge"); err != nil {
+		t.Fatalf("begin merge failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseSelectActive) || scene.Title != "Select Merge Base" {
+		t.Fatalf("expected merge base selection scene, got %+v", scene)
+	}
+	if !scene.Choices[0].Enabled || !scene.Choices[1].Enabled || scene.Choices[2].Enabled {
+		t.Fatalf("expected +1 daemon to be disabled for merge base selection, got %+v", scene.Choices)
+	}
+	if scene.Choices[len(scene.Choices)-2].ID != "merge:back" {
+		t.Fatalf("expected back to node map option in base selection, got %+v", scene.Choices)
+	}
+
+	if _, _, err := session.Apply("active:0"); err != nil {
+		t.Fatalf("choose merge base failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Title != "Select Merge Fork" {
+		t.Fatalf("expected merge fork selection scene, got %+v", scene)
+	}
+	if scene.Choices[0].Enabled || !scene.Choices[1].Enabled || scene.Choices[2].Enabled {
+		t.Fatalf("expected base and +1 fork choices to be disabled, got %+v", scene.Choices)
+	}
+	if scene.Choices[len(scene.Choices)-2].ID != "merge:fork_back" {
+		t.Fatalf("expected back to base selection option, got %+v", scene.Choices)
+	}
+
+	if _, _, err := session.Apply("active:1"); err != nil {
+		t.Fatalf("choose merge fork failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseMergeConfirm) {
+		t.Fatalf("expected merge confirm scene, got %+v", scene)
+	}
+	rendered := strings.Join(scene.Lines, "\n")
+	if !strings.Contains(rendered, "Result: Firewall +1") {
+		t.Fatalf("expected merged name preview, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Speed boost: 8 -> 10") {
+		t.Fatalf("expected fork focus stat preview, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Slot 3 gain: Delay + [//::??::\\\\]") {
+		t.Fatalf("expected obfuscated slot 3 modifier preview, got:\n%s", rendered)
+	}
+
+	if _, _, err := session.Apply("merge:confirm"); err != nil {
+		t.Fatalf("confirm merge failed: %v", err)
+	}
+	scene = session.Snapshot()
+	if scene.Kind != string(game.PhaseMergeResult) || scene.Merge == nil {
+		t.Fatalf("expected merge result scene, got %+v", scene)
+	}
+	if scene.Merge.ResultName != "Firewall +1" || scene.Merge.Ability == "" {
+		t.Fatalf("expected structured merge result payload, got %+v", scene.Merge)
+	}
+}
+
+func TestMergedDaemonCombatAndInspectRenderAllAbilities(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+
+	state := meta.DefaultState()
+	store := meta.NewStore(t.TempDir() + "/meta.json")
+	session := NewSession(reg, store, state, 123, true)
+	session.engine.Run.Roster = []game.Daemon{
+		{
+			ID:           "a",
+			Name:         "Firewall",
+			MergeLevel:   1,
+			ArchetypeID:  "firewall",
+			MaxIntegrity: 52,
+			Integrity:    52,
+			Speed:        10,
+			Stability:    12,
+			Abilities: []game.Ability{
+				{EffectID: "spike", ModifierID: "single"},
+				{EffectID: "patch", ModifierID: "single"},
+				{EffectID: "delay", ModifierID: "intensify"},
+			},
+			TraitID:  "encrypted",
+			Statuses: map[string]int{},
+		},
+	}
+	session.engine.Run.ActiveIndex = 0
+	session.engine.Run.Phase = game.PhaseCombat
+	session.engine.Run.Combat = &game.CombatState{
+		NodeID:   "n1",
+		NodeType: game.NodeStandard,
+		Enemy: game.Daemon{
+			ID:           "enemy",
+			Name:         "NullPointer",
+			ArchetypeID:  "nullpointer",
+			MaxIntegrity: 38,
+			Integrity:    38,
+			Speed:        13,
+			Stability:    8,
+			Abilities:    []game.Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "corrupt", ModifierID: "single"}},
+			TraitID:      "volatile",
+			Statuses:     map[string]int{},
+		},
+		Queue: []game.Actor{game.ActorPlayer, game.ActorEnemy},
+		Round: 1,
+	}
+
+	scene := session.Snapshot()
+	if len(scene.Choices) < 6 || scene.Choices[2].ID != "ability:2" {
+		t.Fatalf("expected merged combatant to expose a third ability choice, got %+v", scene.Choices)
+	}
+	if scene.Combat == nil || scene.Combat.Player.Label != "Your Firewall +1" {
+		t.Fatalf("expected merged display name in combat view, got %+v", scene.Combat)
+	}
+
+	if _, _, err := session.Apply("inspect"); err != nil {
+		t.Fatalf("inspect apply failed: %v", err)
+	}
+	inspect := session.Snapshot()
+	rendered := strings.Join(inspect.Lines, "\n")
+	if !strings.Contains(rendered, "Abilities: Spike + Single, Patch + Single, Delay + Intensify") {
+		t.Fatalf("expected inspect scene to render all abilities, got:\n%s", rendered)
 	}
 }

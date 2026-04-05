@@ -631,7 +631,7 @@ func TestChooseMaintenanceAppliesConfiguredEffects(t *testing.T) {
 	if engine.Run.Phase != PhaseMaintenance {
 		t.Fatalf("expected repair target resolution to return to maintenance, got %s", engine.Run.Phase)
 	}
-	if !strings.Contains(strings.Join(lines, "\n"), "restored 13 Integrity") {
+	if !strings.Contains(strings.Join(lines, "\n"), "restored 13 Health") {
 		t.Fatalf("expected repair log, got %+v", lines)
 	}
 
@@ -719,7 +719,7 @@ func TestChooseMaintenanceAppliesConfiguredEffects(t *testing.T) {
 	if engine.Run.Roster[1].Integrity != 42 {
 		t.Fatalf("expected rotated daemon to heal up to max integrity, got %d", engine.Run.Roster[1].Integrity)
 	}
-	if !strings.Contains(strings.Join(lines, "\n"), "Scheduler restored 8 Integrity during maintenance.") {
+	if !strings.Contains(strings.Join(lines, "\n"), "Scheduler restored 8 Health during maintenance.") {
 		t.Fatalf("expected rotate heal log, got %+v", lines)
 	}
 
@@ -727,5 +727,111 @@ func TestChooseMaintenanceAppliesConfiguredEffects(t *testing.T) {
 	engine.Run.MaintenanceCharge = 0
 	if _, err := engine.ChooseMaintenance("repair"); err == nil {
 		t.Fatalf("expected repair without a stored charge to fail")
+	}
+}
+
+func TestMergeFlowConsumesBranchAndAddsThirdAbility(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 61, true)
+	engine.Run.Roster = []Daemon{
+		{ID: "a", Name: "Firewall", ArchetypeID: "firewall", MaxIntegrity: 50, Integrity: 30, Speed: 8, Stability: 12, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{}},
+		{ID: "b", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 36, Speed: 15, Stability: 9, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "intensify"}}, TraitID: "persistent", Statuses: map[string]int{}},
+	}
+	engine.Run.ActiveIndex = 0
+	engine.Run.Phase = PhaseNodeSelect
+
+	if !engine.CanBeginMerge() {
+		t.Fatalf("expected merge pair to be available")
+	}
+	if _, err := engine.BeginMerge(); err != nil {
+		t.Fatalf("begin merge failed: %v", err)
+	}
+	if engine.Run.Phase != PhaseSelectActive || engine.Run.SelectActiveMode != SelectActiveMergeBase {
+		t.Fatalf("expected merge to start at base selection, got phase=%s mode=%s", engine.Run.Phase, engine.Run.SelectActiveMode)
+	}
+	if _, err := engine.ChooseActive(0); err != nil {
+		t.Fatalf("choose base failed: %v", err)
+	}
+	if engine.Run.SelectActiveMode != SelectActiveMergeFork {
+		t.Fatalf("expected fork selection, got mode=%s", engine.Run.SelectActiveMode)
+	}
+	if _, err := engine.ChooseActive(1); err != nil {
+		t.Fatalf("choose fork failed: %v", err)
+	}
+	if engine.Run.Phase != PhaseMergeConfirm {
+		t.Fatalf("expected merge confirm phase, got %s", engine.Run.Phase)
+	}
+
+	lines, err := engine.ConfirmMerge()
+	if err != nil {
+		t.Fatalf("confirm merge failed: %v", err)
+	}
+	if engine.Run.Phase != PhaseMergeResult {
+		t.Fatalf("expected merge to route through merge result, got %s", engine.Run.Phase)
+	}
+	if len(engine.Run.Roster) != 1 {
+		t.Fatalf("expected fork to be consumed, got roster %+v", engine.Run.Roster)
+	}
+	base := engine.Run.Roster[0]
+	if base.MergeLevel != 1 {
+		t.Fatalf("expected merged base level 1, got %+v", base)
+	}
+	if len(base.Abilities) != 3 {
+		t.Fatalf("expected third skill slot after merge, got %+v", base.Abilities)
+	}
+	if base.Abilities[2].EffectID != "delay" {
+		t.Fatalf("expected fork special move to become slot 3, got %+v", base.Abilities[2])
+	}
+	if base.Speed != 10 {
+		t.Fatalf("expected scheduler merge to add +2 speed, got %+v", base)
+	}
+	if base.Integrity != 43 {
+		t.Fatalf("expected merge heal to restore 13 health after stat gain, got %+v", base)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "Firewall +1 gained Delay + ") {
+		t.Fatalf("expected merge result lines to reveal gained skill, got %+v", lines)
+	}
+	if engine.Run.PendingMergeResult == nil || engine.Run.PendingMergeResult.ResultName != "Firewall +1" {
+		t.Fatalf("expected structured merge result to be populated, got %+v", engine.Run.PendingMergeResult)
+	}
+	if _, err := engine.Continue(); err != nil {
+		t.Fatalf("continue from merge result failed: %v", err)
+	}
+	if engine.Run.Phase != PhaseNodeSelect {
+		t.Fatalf("expected continue to return to node select, got %s", engine.Run.Phase)
+	}
+}
+
+func TestMergeRestrictionsRejectSameArchetypeAndPlusOne(t *testing.T) {
+	reg, err := content.Load()
+	if err != nil {
+		t.Fatalf("content load failed: %v", err)
+	}
+	state := meta.DefaultState()
+	engine := New(reg, &state, 61, true)
+	engine.Run.Roster = []Daemon{
+		{ID: "a", Name: "Firewall", MergeLevel: 1, ArchetypeID: "firewall", MaxIntegrity: 50, Integrity: 50, Speed: 8, Stability: 12, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}, {EffectID: "delay", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{}},
+		{ID: "b", Name: "Firewall", ArchetypeID: "firewall", MaxIntegrity: 48, Integrity: 48, Speed: 8, Stability: 12, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "patch", ModifierID: "single"}}, TraitID: "encrypted", Statuses: map[string]int{}},
+		{ID: "c", Name: "Scheduler", ArchetypeID: "scheduler", MaxIntegrity: 42, Integrity: 42, Speed: 15, Stability: 9, Abilities: []Ability{{EffectID: "spike", ModifierID: "single"}, {EffectID: "delay", ModifierID: "single"}}, TraitID: "persistent", Statuses: map[string]int{}},
+	}
+
+	if engine.canMergeAsBase(0) {
+		t.Fatalf("expected +1 daemon to be ineligible as base")
+	}
+	if engine.canMergePair(1, 0) {
+		t.Fatalf("expected +1 daemon to be ineligible as fork")
+	}
+	if engine.canMergePair(1, 1) {
+		t.Fatalf("expected same daemon merge to be ineligible")
+	}
+	if engine.canMergePair(1, 0) {
+		t.Fatalf("expected same-archetype or +1 merge to be rejected")
+	}
+	if !engine.canMergePair(1, 2) {
+		t.Fatalf("expected different unmerged archetypes to be mergeable")
 	}
 }

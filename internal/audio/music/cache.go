@@ -3,18 +3,23 @@ package music
 import "fmt"
 
 type Cache struct {
-	loops map[LoopID][]byte
+	loops map[string][]byte
 }
 
 func NewCache() *Cache {
-	return &Cache{loops: make(map[LoopID][]byte)}
+	return &Cache{loops: make(map[string][]byte)}
 }
 
 func (c *Cache) Get(loop LoopID) ([]byte, error) {
-	if pcm, ok := c.loops[loop]; ok {
+	return c.GetVariant(loop, ReactiveState{})
+}
+
+func (c *Cache) GetVariant(loop LoopID, state ReactiveState) ([]byte, error) {
+	key := string(loop) + "|" + state.cacheKey()
+	if pcm, ok := c.loops[key]; ok {
 		return pcm, nil
 	}
-	pattern, ok := PatternForLoop(loop)
+	pattern, ok := patternForLoopState(loop, state)
 	if !ok {
 		return nil, fmt.Errorf("unknown music loop %q", loop)
 	}
@@ -22,6 +27,6 @@ func (c *Cache) Get(loop LoopID) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.loops[loop] = pcm
+	c.loops[key] = pcm
 	return pcm, nil
 }

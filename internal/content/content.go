@@ -17,13 +17,14 @@ type StatsDef struct {
 }
 
 type ArchetypeDef struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Role       string   `json:"role"`
-	Base       StatsDef `json:"base"`
-	Growth     StatsDef `json:"growth"`
-	EffectPool []string `json:"effect_pool"`
-	TraitPool  []string `json:"trait_pool"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Role           string   `json:"role"`
+	Base           StatsDef `json:"base"`
+	Growth         StatsDef `json:"growth"`
+	EffectPool     []string `json:"effect_pool"`
+	TraitPool      []string `json:"trait_pool"`
+	MergeFocusStat string   `json:"merge_focus_stat"`
 }
 
 type EffectDef struct {
@@ -194,6 +195,11 @@ func (r *Registry) validate() error {
 	}
 
 	for _, archetype := range r.Data.Archetypes {
+		switch archetype.MergeFocusStat {
+		case "integrity", "speed", "stability":
+		default:
+			return fmt.Errorf("archetype %q has invalid merge_focus_stat %q", archetype.ID, archetype.MergeFocusStat)
+		}
 		hasOffense := false
 		for _, effectID := range archetype.EffectPool {
 			effect, ok := r.Effects[effectID]

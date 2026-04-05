@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ type Scene struct {
 	Lines   []string
 	Choices []Choice
 	Combat  *CombatView
+	Merge   *MergeView
 	NodeMap *NodeMapView
 	WonRun  bool // set when Kind == "game_over" and the player won
 }
@@ -56,6 +58,18 @@ type CombatantView struct {
 	IntegrityCurrent int
 	IntegrityMax     int
 	Statuses         []string
+}
+
+type MergeView struct {
+	ForkName   string
+	ResultName string
+	Trait      string
+	FocusStat  string
+	StatBefore int
+	StatAfter  int
+	Healed     int
+	Ability    string
+	Daemon     CombatantView
 }
 
 type NodeMapView struct {
@@ -131,7 +145,7 @@ func (s *Session) Snapshot() Scene {
 	case game.PhaseNodeSelect:
 		active := s.engine.ActiveDaemon()
 		lines := []string{
-			fmt.Sprintf("Active daemon: %s", daemonSummary(active.Name, active, s.registry)),
+			fmt.Sprintf("Active daemon: %s", daemonSummary(active, s.registry)),
 			fmt.Sprintf("Maintenance charge: %s", formatMaintenanceCharge(run.MaintenanceCharge)),
 			"",
 			"Visible network nodes:",
@@ -161,13 +175,13 @@ func (s *Session) Snapshot() Scene {
 				}
 			}
 		}
-		choices = append(choices,
-			Choice{ID: "view:maintenance", Label: "Open Maintenance Console", Enabled: true, Details: maintenanceConsoleDetails(run.MaintenanceCharge)},
-			Choice{ID: "rotate", Label: "Rotate Lead", Enabled: len(run.Roster) > 1, Details: rotateLeadNodeDetails(len(run.Roster) > 1)},
-		)
-		if len(run.Roster) <= 1 {
-			choices[len(choices)-1].Label = "Rotate Lead (No reserve daemon)"
-		}
+		canMerge := s.engine.CanBeginMerge()
+		choices = append(choices, Choice{
+			ID:      "merge",
+			Label:   "Merge Daemons",
+			Enabled: canMerge,
+			Details: mergeNodeDetails(canMerge),
+		})
 		choices = append(choices, Choice{ID: "quit", Label: "Quit", Enabled: true})
 		return Scene{
 			Kind:    string(run.Phase),
@@ -182,23 +196,30 @@ func (s *Session) Snapshot() Scene {
 		active := s.engine.ActiveDaemon()
 		lines := []string{
 			fmt.Sprintf("Enemy Daemon: %s [%s]", combatantName("Enemy", &combat.Enemy), combat.NodeType),
-			fmt.Sprintf("Integrity: %d/%d | Status: %s", combat.Enemy.Integrity, combat.Enemy.MaxIntegrity, formatStatuses(combat.Enemy.Statuses, s.registry)),
+			fmt.Sprintf("Health: %d/%d | Status: %s", combat.Enemy.Integrity, combat.Enemy.MaxIntegrity, formatStatuses(combat.Enemy.Statuses, s.registry)),
 			"",
 			fmt.Sprintf("Your Daemon: %s [%s]", combatantName("Your", active), s.registry.Traits[active.TraitID].Name),
-			fmt.Sprintf("Integrity: %d/%d | Status: %s", active.Integrity, active.MaxIntegrity, formatStatuses(active.Statuses, s.registry)),
+			fmt.Sprintf("Health: %d/%d | Status: %s", active.Integrity, active.MaxIntegrity, formatStatuses(active.Statuses, s.registry)),
 			fmt.Sprintf("Round: %d", combat.Round),
 		}
 		if len(combat.LastLog) > 0 {
 			lines = append(lines, "", "Last resolution:")
 			lines = append(lines, combat.LastLog...)
 		}
-		choices := []Choice{
-			{ID: "ability:0", Label: abilityLabel(active.Abilities[0], s.registry), Enabled: true, Details: abilityDetails(active.Abilities[0], s.registry)},
-			{ID: "ability:1", Label: abilityLabel(active.Abilities[1], s.registry), Enabled: true, Details: abilityDetails(active.Abilities[1], s.registry)},
-			{ID: "isolate", Label: "Isolate", Enabled: true, Details: isolateDetails()},
-			{ID: "inspect", Label: "Inspect", Enabled: true, Details: inspectDetails()},
-			{ID: "quit", Label: "Quit", Enabled: true},
+		choices := make([]Choice, 0, len(active.Abilities)+3)
+		for i, ability := range active.Abilities {
+			choices = append(choices, Choice{
+				ID:      "ability:" + strconv.Itoa(i),
+				Label:   abilityLabel(ability, s.registry),
+				Enabled: true,
+				Details: abilityDetails(ability, s.registry),
+			})
 		}
+		choices = append(choices,
+			Choice{ID: "isolate", Label: "Isolate", Enabled: true, Details: isolateDetails()},
+			Choice{ID: "inspect", Label: "Inspect", Enabled: true, Details: inspectDetails()},
+			Choice{ID: "quit", Label: "Quit", Enabled: true},
+		)
 		return Scene{
 			Kind:    string(run.Phase),
 			Title:   "Combat",
@@ -235,7 +256,7 @@ func (s *Session) Snapshot() Scene {
 		lines = append(lines,
 			"",
 			"Stat key:",
-			"INT Integrity: how much damage a daemon can take before crashing.",
+			"HP Health: how much damage a daemon can take before crashing.",
 			"SPD Speed: who acts first each round.",
 			"STB Stability: resists hostile effects and lowers isolation chance against this daemon.",
 			"",
@@ -251,14 +272,14 @@ func (s *Session) Snapshot() Scene {
 
 	case game.PhaseReplace:
 		lines := []string{
-			fmt.Sprintf("Captured: %s", daemonSummary(run.PendingCapture.Name, run.PendingCapture, s.registry)),
+			fmt.Sprintf("Captured: %s", daemonSummary(run.PendingCapture, s.registry)),
 			"Roster is full. Choose a daemon to replace or discard the capture.",
 		}
 		choices := []Choice{}
 		for i, daemon := range run.Roster {
 			choices = append(choices, Choice{
 				ID:      "replace:" + strconv.Itoa(i),
-				Label:   fmt.Sprintf("Replace %s", daemonSummary(daemon.Name, &daemon, s.registry)),
+				Label:   fmt.Sprintf("Replace %s", daemonSummary(&daemon, s.registry)),
 				Enabled: true,
 			})
 		}
@@ -282,7 +303,7 @@ func (s *Session) Snapshot() Scene {
 		active := s.engine.ActiveDaemon()
 		lines := []string{
 			"Choose repair or fortify, then select any daemon in your roster as the target.",
-			fmt.Sprintf("Active daemon: %s", daemonSummary(active.Name, active, s.registry)),
+			fmt.Sprintf("Active daemon: %s", daemonSummary(active, s.registry)),
 			fmt.Sprintf("Maintenance charge: %s", formatMaintenanceCharge(run.MaintenanceCharge)),
 			"",
 			"Roster telemetry:",
@@ -292,7 +313,7 @@ func (s *Session) Snapshot() Scene {
 			if i == run.ActiveIndex {
 				prefix = "* "
 			}
-			lines = append(lines, prefix+daemonSummary(daemon.Name, &daemon, s.registry))
+			lines = append(lines, prefix+daemonSummary(&daemon, s.registry))
 		}
 		hasCharge := run.MaintenanceCharge > 0
 		choices := []Choice{
@@ -307,23 +328,41 @@ func (s *Session) Snapshot() Scene {
 		title := "Select Active Daemon"
 		lines := []string{"Select the next active daemon."}
 		disableCurrent := false
+		allowBackToNode := false
+		allowBackToBase := false
 		if run.SelectActiveMode == game.SelectActiveRotateLead {
 			title = "Rotate Lead"
 			lines = []string{"Select a different daemon to rotate into the lead."}
 			disableCurrent = true
+			allowBackToNode = true
 		} else if run.SelectActiveMode == game.SelectActiveRepair {
 			title = "Repair Target"
 			lines = []string{"Select a daemon to repair."}
 		} else if run.SelectActiveMode == game.SelectActiveFortify {
 			title = "Fortify Target"
 			lines = []string{"Select a daemon to fortify."}
+		} else if run.SelectActiveMode == game.SelectActiveMergeBase {
+			title = "Select Merge Base"
+			lines = []string{"Select the base daemon that will absorb a fork."}
+			allowBackToNode = true
+		} else if run.SelectActiveMode == game.SelectActiveMergeFork {
+			title = "Select Merge Fork"
+			lines = []string{"Select the fork daemon to be absorbed into the base daemon."}
+			allowBackToBase = true
 		}
 		choices := []Choice{}
 		for i, daemon := range run.Roster {
+			enabled := !disableCurrent || i != run.ActiveIndex
+			switch run.SelectActiveMode {
+			case game.SelectActiveMergeBase:
+				enabled = s.engine.CanMergeAsBase(i)
+			case game.SelectActiveMergeFork:
+				enabled = s.engine.CanMergeAsFork(i)
+			}
 			choices = append(choices, Choice{
 				ID:      "active:" + strconv.Itoa(i),
-				Label:   daemonSummary(daemon.Name, &daemon, s.registry),
-				Enabled: !disableCurrent || i != run.ActiveIndex,
+				Label:   daemonSummary(&daemon, s.registry),
+				Enabled: enabled,
 			})
 		}
 		if run.SelectActiveMode == game.SelectActiveRotateLead {
@@ -332,8 +371,85 @@ func (s *Session) Snapshot() Scene {
 		if run.SelectActiveMode == game.SelectActiveRepair || run.SelectActiveMode == game.SelectActiveFortify {
 			choices = append(choices, Choice{ID: "maintenance:back", Label: "Back to Maintenance", Enabled: true})
 		}
+		if allowBackToNode && run.SelectActiveMode == game.SelectActiveMergeBase {
+			choices = append(choices, Choice{ID: "merge:back", Label: "Back to Node Map", Enabled: true})
+		}
+		if allowBackToBase {
+			choices = append(choices, Choice{ID: "merge:fork_back", Label: "Back to Base Selection", Enabled: true})
+		}
 		choices = append(choices, Choice{ID: "quit", Label: "Quit", Enabled: true})
 		return Scene{Kind: string(run.Phase), Title: title, Lines: lines, Choices: choices}
+
+	case game.PhaseMergeConfirm:
+		base := &run.Roster[run.PendingMergeBase]
+		fork := &run.Roster[run.PendingMergeFork]
+		focusStat, beforeValue, afterValue := mergePreviewStatDelta(base, fork, s.registry)
+		healAmount := mergePreviewHeal(base, fork, s.registry)
+		lines := []string{
+			fmt.Sprintf("Base: %s", daemonSummary(base, s.registry)),
+			fmt.Sprintf("Fork: %s", daemonSummary(fork, s.registry)),
+			"",
+			fmt.Sprintf("Result: %s", mergedNamePreview(base)),
+			fmt.Sprintf("Trait retained: %s", s.registry.Traits[base.TraitID].Name),
+			fmt.Sprintf("%s boost: %d -> %d", focusStat, beforeValue, afterValue),
+			fmt.Sprintf("Health restore: +%d", healAmount),
+			fmt.Sprintf("Slot 3 gain: %s", mergePreviewAbility(fork, s.registry)),
+			"",
+			fmt.Sprintf("%s will be consumed.", game.DaemonDisplayName(fork)),
+		}
+		return Scene{
+			Kind:  string(run.Phase),
+			Title: "Merge Confirm",
+			Lines: lines,
+			Choices: []Choice{
+				{ID: "merge:confirm", Label: "Confirm Merge", Enabled: true},
+				{ID: "merge:confirm_back", Label: "Back to Fork Selection", Enabled: true},
+				{ID: "quit", Label: "Quit", Enabled: true},
+			},
+		}
+
+	case game.PhaseMergeResult:
+		merge := run.PendingMergeResult
+		if merge == nil || merge.RosterIndex < 0 || merge.RosterIndex >= len(run.Roster) {
+			return Scene{
+				Kind:    string(run.Phase),
+				Title:   "Merge Complete",
+				Lines:   []string{"Merge completed."},
+				Choices: []Choice{{ID: "continue", Label: "Back to Node Map", Enabled: true}, {ID: "quit", Label: "Quit", Enabled: true}},
+			}
+		}
+		result := &run.Roster[merge.RosterIndex]
+		lines := []string{
+			fmt.Sprintf("Base seed: %s", merge.BaseSeedName),
+			fmt.Sprintf("Fork consumed: %s", merge.ForkName),
+			fmt.Sprintf("Result daemon: %s", merge.ResultName),
+		}
+		return Scene{
+			Kind:  string(run.Phase),
+			Title: "Merge Complete",
+			Lines: lines,
+			Choices: []Choice{
+				{ID: "continue", Label: "Back to Node Map", Enabled: true},
+				{ID: "quit", Label: "Quit", Enabled: true},
+			},
+			Merge: &MergeView{
+				ForkName:   merge.ForkName,
+				ResultName: merge.ResultName,
+				Trait:      s.registry.Traits[merge.TraitID].Name,
+				FocusStat:  merge.FocusStat,
+				StatBefore: merge.StatBefore,
+				StatAfter:  merge.StatAfter,
+				Healed:     merge.Healed,
+				Ability:    abilityLabel(merge.Ability, s.registry),
+				Daemon: CombatantView{
+					Label:            game.DaemonDisplayName(result),
+					Trait:            s.registry.Traits[result.TraitID].Name,
+					IntegrityCurrent: result.Integrity,
+					IntegrityMax:     result.MaxIntegrity,
+					Statuses:         formatStatusesList(result.Statuses, s.registry),
+				},
+			},
+		}
 
 	case game.PhaseGameOver:
 		result := "Run failed."
@@ -403,6 +519,14 @@ func (s *Session) Apply(choiceID string) (Scene, []Event, error) {
 		lines, err = s.engine.OpenMaintenance()
 	case choiceID == "view:nodes":
 		lines, err = s.engine.OpenNodeMap()
+	case choiceID == "merge":
+		lines, err = s.engine.BeginMerge()
+	case choiceID == "merge:back", choiceID == "merge:fork_back":
+		lines, err = s.engine.CancelMergeSelection()
+	case choiceID == "merge:confirm_back":
+		lines, err = s.engine.CancelMergeConfirm()
+	case choiceID == "merge:confirm":
+		lines, err = s.engine.ConfirmMerge()
 	case choiceID == "rotate":
 		lines, err = s.engine.BeginRotateLead()
 	case choiceID == "rotate:back":
@@ -503,12 +627,12 @@ func NewSeed() int64 {
 	return time.Now().UnixNano()
 }
 
-func daemonSummary(label string, d *game.Daemon, registry *content.Registry) string {
+func daemonSummary(d *game.Daemon, registry *content.Registry) string {
 	if d == nil {
 		return "none"
 	}
 	trait := registry.Traits[d.TraitID]
-	return fmt.Sprintf("%s %d/%d INT | SPD %d | STB %d | %s", label, d.Integrity, d.MaxIntegrity, d.Speed, d.Stability, trait.Name)
+	return fmt.Sprintf("%s %d/%d HP | SPD %d | STB %d | %s", game.DaemonDisplayName(d), d.Integrity, d.MaxIntegrity, d.Speed, d.Stability, trait.Name)
 }
 
 func inspectCombatantLines(side string, d *game.Daemon, registry *content.Registry) []string {
@@ -517,9 +641,13 @@ func inspectCombatantLines(side string, d *game.Daemon, registry *content.Regist
 	}
 
 	trait := registry.Traits[d.TraitID]
+	abilityLabels := make([]string, 0, len(d.Abilities))
+	for _, ability := range d.Abilities {
+		abilityLabels = append(abilityLabels, abilityLabel(ability, registry))
+	}
 	lines := []string{
-		daemonSummary(combatantName(side, d), d, registry),
-		fmt.Sprintf("Abilities: %s, %s", abilityLabel(d.Abilities[0], registry), abilityLabel(d.Abilities[1], registry)),
+		fmt.Sprintf("%s %s", side, daemonSummary(d, registry)),
+		fmt.Sprintf("Abilities: %s", strings.Join(abilityLabels, ", ")),
 		fmt.Sprintf("Trait: %s - %s", trait.Name, traitEffectSummary(trait)),
 	}
 
@@ -601,14 +729,14 @@ func abilityDetails(ability game.Ability, registry *content.Registry) *ChoiceDet
 func isolateDetails() *ChoiceDetails {
 	return &ChoiceDetails{
 		Title:   "Isolate",
-		Preview: "Capture at 50% Integrity or lower. Stronger odds below 25%.",
+		Preview: "Capture at 50% Health or lower. Stronger odds below 25%.",
 		Lines: []string{
 			"Attempt to capture the enemy without defeating it.",
 			"",
 			"Only available on non-boss encounters.",
-			"Eligible at 50% Integrity or lower.",
-			"Base chance: 50% from 25-50% Integrity.",
-			"Base chance: 80% at 25% Integrity or lower.",
+			"Eligible at 50% Health or lower.",
+			"Base chance: 50% from 25-50% Health.",
+			"Base chance: 80% at 25% Health or lower.",
 			"Corrupted adds +10%; other negative statuses add +5% each.",
 			"Higher target Stability lowers the capture chance.",
 			"Target Stability reduces chance by max(0, Stability/5 - 1).",
@@ -624,7 +752,7 @@ func inspectDetails() *ChoiceDetails {
 		Lines: []string{
 			"View both combatants in more detail.",
 			"",
-			"Shows traits, stats, and both ability labels.",
+			"Shows traits, stats, and all ability labels.",
 			"Does not spend a combat turn.",
 			"Use Back to return to combat.",
 		},
@@ -660,12 +788,12 @@ func maintenanceConsoleDetails(charge int) *ChoiceDetails {
 }
 
 func maintenanceRepairDetails(enabled bool) *ChoiceDetails {
-	preview := "Pick any daemon, then restore 30% max Integrity, minimum 10, and cleanse one negative status."
+	preview := "Pick any daemon, then restore 30% max Health, minimum 10, and cleanse one negative status."
 	lines := []string{
 		"Choose a daemon, then perform a focused repair cycle.",
 		"",
 		"Cost: 1 maintenance charge.",
-		"Restore: 30% of max Integrity.",
+		"Restore: 30% of max Health.",
 		"Minimum restore: 10.",
 		"Also clears one negative status if present.",
 		"Best when any roster member is damaged or corrupted.",
@@ -682,12 +810,12 @@ func maintenanceRepairDetails(enabled bool) *ChoiceDetails {
 }
 
 func maintenanceFortifyDetails(enabled bool) *ChoiceDetails {
-	preview := "Pick any daemon, then restore 10% max Integrity, minimum 4, and grant Stabilized for the next fight."
+	preview := "Pick any daemon, then restore 10% max Health, minimum 4, and grant Stabilized for the next fight."
 	lines := []string{
 		"Choose a daemon, then apply a defensive hardening pass.",
 		"",
 		"Cost: 1 maintenance charge.",
-		"Restore: 10% of max Integrity.",
+		"Restore: 10% of max Health.",
 		"Minimum restore: 4.",
 		"Grants Stabilized(2).",
 		"Best when you want to prep a specific daemon for the next node.",
@@ -708,11 +836,11 @@ func rotateLeadNodeDetails(enabled bool) *ChoiceDetails {
 		"Hand the lead slot to a reserve daemon.",
 		"",
 		"Cost: free.",
-		"After selection: the new active daemon restores 20% of max Integrity.",
+		"After selection: the new active daemon restores 20% of max Health.",
 		"Minimum restore: 6.",
 		"Best when you want to preserve the current lead or pivot into a better matchup.",
 	}
-	preview := "Choose a reserve daemon; the new lead restores 20% max Integrity, minimum 6."
+	preview := "Choose a reserve daemon; the new lead restores 20% max Health, minimum 6."
 	if !enabled {
 		lines = append(lines, "", "Unavailable: you do not have a reserve daemon yet.")
 		preview = "Unavailable until you have at least one reserve daemon."
@@ -722,6 +850,75 @@ func rotateLeadNodeDetails(enabled bool) *ChoiceDetails {
 		Preview: preview,
 		Lines:   lines,
 	}
+}
+
+func mergeNodeDetails(enabled bool) *ChoiceDetails {
+	preview := "Pick a base and fork daemon. The fork is consumed and the base becomes +1 with a third skill."
+	lines := []string{
+		"Open the +1 merge flow from the node map.",
+		"",
+		"Cost: free.",
+		"Choose a base daemon, then a fork daemon.",
+		"Fork must be a different archetype and neither daemon can already be +1.",
+		"Result: the base daemon keeps its trait and core kit, gains the fork special move as slot 3, heals 25% max Health (minimum 8), and gains +2 in the fork's focus stat.",
+		"The new slot 3 modifier is rolled at confirm time and weighted toward modifiers already used by the fork.",
+	}
+	if !enabled {
+		lines = append(lines, "", "Unavailable: you need two unmerged daemons of different archetypes.")
+		preview = "Unavailable until your roster has an eligible base and fork pair."
+	}
+	return &ChoiceDetails{
+		Title:   "Merge Daemons",
+		Preview: preview,
+		Lines:   lines,
+	}
+}
+
+func mergePreviewAbility(fork *game.Daemon, registry *content.Registry) string {
+	if fork == nil || len(fork.Abilities) < 2 {
+		return "[//::??::\\\\]"
+	}
+	effect := registry.Effects[fork.Abilities[1].EffectID]
+	return fmt.Sprintf("%s + [//::??::\\\\]", effect.Name)
+}
+
+func mergedNamePreview(base *game.Daemon) string {
+	if base == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s +%d", base.Name, base.MergeLevel+1)
+}
+
+func mergePreviewStatDelta(base *game.Daemon, fork *game.Daemon, registry *content.Registry) (string, int, int) {
+	if base == nil || fork == nil {
+		return "Stat", 0, 0
+	}
+	switch registry.Archetypes[fork.ArchetypeID].MergeFocusStat {
+	case "integrity":
+		return "Max Health", base.MaxIntegrity, base.MaxIntegrity + 2
+	case "stability":
+		return "Stability", base.Stability, base.Stability + 2
+	case "speed":
+		return "Speed", base.Speed, base.Speed + 2
+	default:
+		return "Stat", 0, 0
+	}
+}
+
+func mergePreviewHeal(base *game.Daemon, fork *game.Daemon, registry *content.Registry) int {
+	if base == nil || fork == nil {
+		return 0
+	}
+	maxIntegrity := base.MaxIntegrity
+	if registry.Archetypes[fork.ArchetypeID].MergeFocusStat == "integrity" {
+		maxIntegrity += 2
+	}
+	recovery := max(8, int(math.Ceil(float64(maxIntegrity)*0.25)))
+	restored := min(maxIntegrity, base.Integrity+recovery) - base.Integrity
+	if restored < 0 {
+		return 0
+	}
+	return restored
 }
 
 func traitEffectSummary(trait content.TraitDef) string {
@@ -843,7 +1040,7 @@ func combatantName(side string, daemon *game.Daemon) string {
 	if daemon == nil {
 		return side + " Daemon"
 	}
-	return side + " " + daemon.Name
+	return side + " " + game.DaemonDisplayName(daemon)
 }
 
 func buildNodeMapView(run *game.RunState, selectable map[string]struct{}) *NodeMapView {

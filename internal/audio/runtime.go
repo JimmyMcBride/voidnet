@@ -12,12 +12,15 @@ import (
 	"github.com/ebitengine/oto/v3"
 
 	"voidnet/internal/audio/music"
-	"voidnet/internal/audio/sfx"
+	"voidnet/internal/audio/otox"
 )
 
 type Runtime interface {
 	Play(event Event, seed int64)
+	PlayUI(event Event, seed int64)
 	StartMusicLoop(loop music.LoopID) error
+	StopMusicLoop()
+	SetMusicReactiveState(state music.ReactiveState) error
 	SetMuted(muted bool)
 	Muted() bool
 	Available() bool
@@ -33,12 +36,14 @@ type Options struct {
 
 type combinedRuntime struct {
 	sfx   Runtime
+	ui    Runtime
 	music musicRuntime
 	muted bool
 }
 
 type musicRuntime interface {
 	StartLoop(music.LoopID) error
+	SetReactiveState(music.ReactiveState) error
 	StopLoop()
 	SetMuted(bool)
 	Available() bool
@@ -84,6 +89,11 @@ func NewRuntime(opts Options) (Runtime, error) {
 		sfxRuntime = newSFXRuntime()
 	}
 	sfxRuntime.SetMuted(opts.Muted)
+	uiRuntime := opts.SFX
+	if uiRuntime == nil {
+		uiRuntime = newSFXRuntime()
+	}
+	uiRuntime.SetMuted(opts.Muted)
 
 	factory := opts.MusicFactory
 	if factory == nil {
@@ -101,6 +111,7 @@ func NewRuntime(opts Options) (Runtime, error) {
 
 	return &combinedRuntime{
 		sfx:   sfxRuntime,
+		ui:    uiRuntime,
 		music: musicRuntime,
 		muted: opts.Muted,
 	}, nil
@@ -117,6 +128,20 @@ func (r *combinedRuntime) Play(event Event, seed int64) {
 	r.sfx.Play(event, seed)
 }
 
+func (r *combinedRuntime) PlayUI(event Event, seed int64) {
+	if r == nil {
+		return
+	}
+	target := r.ui
+	if target == nil {
+		target = r.sfx
+	}
+	if target == nil {
+		return
+	}
+	target.Play(event, seed)
+}
+
 func (r *combinedRuntime) StartMusicLoop(loop music.LoopID) error {
 	if r == nil || r.music == nil {
 		return nil
@@ -124,10 +149,27 @@ func (r *combinedRuntime) StartMusicLoop(loop music.LoopID) error {
 	return r.music.StartLoop(loop)
 }
 
+func (r *combinedRuntime) StopMusicLoop() {
+	if r == nil || r.music == nil {
+		return
+	}
+	r.music.StopLoop()
+}
+
+func (r *combinedRuntime) SetMusicReactiveState(state music.ReactiveState) error {
+	if r == nil || r.music == nil {
+		return nil
+	}
+	return r.music.SetReactiveState(state)
+}
+
 func (r *combinedRuntime) SetMuted(muted bool) {
 	r.muted = muted
 	if r.sfx != nil {
 		r.sfx.SetMuted(muted)
+	}
+	if r.ui != nil && r.ui != r.sfx {
+		r.ui.SetMuted(muted)
 	}
 	if r.music != nil {
 		r.music.SetMuted(muted)
@@ -161,6 +203,9 @@ func (r *combinedRuntime) Close() error {
 	}
 	if r.sfx != nil {
 		err = errors.Join(err, r.sfx.Close())
+	}
+	if r.ui != nil && r.ui != r.sfx {
+		err = errors.Join(err, r.ui.Close())
 	}
 	return err
 }
@@ -208,7 +253,13 @@ func (r *sfxPlaybackRuntime) Play(event Event, seed int64) {
 	}
 }
 
-func (r *sfxPlaybackRuntime) StartMusicLoop(loop music.LoopID) error { return nil }
+func (r *sfxPlaybackRuntime) PlayUI(event Event, seed int64) {
+	r.Play(event, seed)
+}
+
+func (r *sfxPlaybackRuntime) StartMusicLoop(loop music.LoopID) error                { return nil }
+func (r *sfxPlaybackRuntime) StopMusicLoop()                                        {}
+func (r *sfxPlaybackRuntime) SetMusicReactiveState(state music.ReactiveState) error { return nil }
 
 func (r *sfxPlaybackRuntime) SetMuted(muted bool) {
 	r.muted.Store(muted)
@@ -236,7 +287,11 @@ func (r *sfxPlaybackRuntime) Close() error {
 
 func (n *noopRuntime) Play(event Event, seed int64) {}
 
-func (n *noopRuntime) StartMusicLoop(loop music.LoopID) error { return nil }
+func (n *noopRuntime) PlayUI(event Event, seed int64) {}
+
+func (n *noopRuntime) StartMusicLoop(loop music.LoopID) error                { return nil }
+func (n *noopRuntime) StopMusicLoop()                                        {}
+func (n *noopRuntime) SetMusicReactiveState(state music.ReactiveState) error { return nil }
 
 func (n *noopRuntime) SetMuted(muted bool) {
 	n.muted.Store(muted)
@@ -255,11 +310,7 @@ func (n *noopRuntime) Close() error {
 }
 
 func newOtoBackend() (audioBackend, error) {
-	ctx, ready, err := oto.NewContext(&oto.NewContextOptions{
-		SampleRate:   sfx.DefaultSampleRate,
-		ChannelCount: 1,
-		Format:       oto.FormatSignedInt16LE,
-	})
+	ctx, ready, err := otox.SharedContext()
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +329,7 @@ func (b *otoBackend) waitReady() error {
 }
 
 func (b *otoBackend) PlayPCM(samples []int16, sampleRate int) error {
-	if sampleRate != sfx.DefaultSampleRate {
+	if sampleRate != otox.SampleRate {
 		return fmt.Errorf("unsupported sample rate %d", sampleRate)
 	}
 	if err := b.waitReady(); err != nil {

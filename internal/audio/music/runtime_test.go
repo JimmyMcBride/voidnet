@@ -134,3 +134,37 @@ func TestCloseMarksUnavailableWithoutPlayer(t *testing.T) {
 		t.Fatalf("expected close to mark runtime unavailable")
 	}
 }
+
+func TestSetReactiveStateRerendersActiveLoop(t *testing.T) {
+	p := &fakePlayer{}
+	r, _ := NewRuntime(Options{Factory: func() (player, error) { return p, nil }})
+	if err := r.StartLoop(LoopBattle); err != nil {
+		t.Fatalf("start loop: %v", err)
+	}
+	initial := append([]byte(nil), p.lastPCM...)
+
+	if err := r.SetReactiveState(ReactiveState{BattleTheme: BattleThemeCorrupted, Intensity: 2}); err != nil {
+		t.Fatalf("set reactive state: %v", err)
+	}
+
+	if p.startCalls != 2 {
+		t.Fatalf("expected reactive rerender to restart playback, got %d starts", p.startCalls)
+	}
+	same := true
+	if len(initial) == len(p.lastPCM) {
+		for i := range initial {
+			if initial[i] != p.lastPCM[i] {
+				same = false
+				break
+			}
+		}
+	} else {
+		same = false
+	}
+	if same {
+		t.Fatalf("expected reactive state to alter rendered PCM")
+	}
+	if len(p.lastPCM) == 0 {
+		t.Fatalf("expected rerendered pcm to be non-empty")
+	}
+}

@@ -34,11 +34,18 @@ const (
 )
 
 const (
-	playbackIntroDelay  = 220 * time.Millisecond
-	playbackTurnDelay   = 320 * time.Millisecond
-	playbackActionDelay = 260 * time.Millisecond
-	playbackRollDelay   = 220 * time.Millisecond
-	playbackImpactDelay = 520 * time.Millisecond
+	playbackIntroDelay     = 160 * time.Millisecond
+	playbackTurnDelay      = 220 * time.Millisecond
+	playbackActionDelay    = 180 * time.Millisecond
+	playbackRollDelay      = 160 * time.Millisecond
+	playbackImpactDelay    = 200 * time.Millisecond
+	playbackSequenceDelay  = 420 * time.Millisecond
+	playbackTypingDelay    = 18 * time.Millisecond
+	playbackTypingPulseGap = 45 * time.Millisecond
+	playbackFastScale      = 0.38
+	playbackFastMinDelay   = 24 * time.Millisecond
+	playbackFastTypingStep = 3
+	playbackFastPulseGap   = 75 * time.Millisecond
 )
 
 type model struct {
@@ -59,31 +66,84 @@ type model struct {
 	playbackImpact      bool
 	playbackPhase       string
 	playbackPhaseStyle  string
+	playbackTyping      bool
+	playbackAutoFast    bool
 	combatLogLines      []string
 	combatLogScroll     int
 	combatLogAutoFollow bool
 	combatLogGPrefix    bool
-	activeModal         *app.ChoiceDetails
+	mergeCutscene       *mergeCutscene
+	activeModal         *modalView
+}
+
+type modalKind string
+
+const (
+	modalKindDetail   modalKind = "detail"
+	modalKindCommands modalKind = "commands"
+)
+
+type modalView struct {
+	kind    modalKind
+	title   string
+	preview string
+	lines   []string
 }
 
 type playbackSequence struct {
 	resolvedScene app.Scene
 	beats         []playbackBeat
 	index         int
+	stage         playbackStage
+	visibleRunes  int
+	pulseCooldown time.Duration
+	committed     bool
+	fast          bool
 }
 
 type playbackBeat struct {
-	lines      []string
-	delay      time.Duration
+	line       string
+	startDelay time.Duration
+	holdDelay  time.Duration
 	actor      string
 	impact     bool
 	applyScene bool
 	phase      string
 	phaseStyle string
 	cue        audio.Event
+	sequenceEnd bool
+	class      combatLogClass
 }
 
 type playbackTickMsg struct{}
+
+type playbackStage string
+
+const (
+	playbackStageStart playbackStage = "start"
+	playbackStageType  playbackStage = "type"
+	playbackStageHold  playbackStage = "hold"
+)
+
+type mergeTickMsg struct{}
+
+type mergeCutscene struct {
+	beats    []mergeBeat
+	index    int
+	phase    string
+	progress int
+	stream   []string
+	complete bool
+}
+
+type mergeBeat struct {
+	phase    string
+	progress int
+	line     string
+	delay    time.Duration
+	cue      audio.Event
+	final    bool
+}
 
 func Run(session *app.Session) (err error) {
 	bootLoop := music.LoopBoot
@@ -166,14 +226,46 @@ func (m *model) switchMusic(scene app.Scene) {
 		return
 	}
 	loop := musicForScene(scene)
-	if loop == m.activeLoop {
-		return
+	if loop != m.activeLoop {
+		if err := m.audio.StartMusicLoop(loop); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to start music loop %q: %v\n", loop, err)
+			return
+		}
+		m.activeLoop = loop
 	}
-	if err := m.audio.StartMusicLoop(loop); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to start music loop %q: %v\n", loop, err)
-		return
+	if err := m.audio.SetMusicReactiveState(musicReactiveState(scene)); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to update music reactive state: %v\n", err)
 	}
-	m.activeLoop = loop
+}
+
+func musicReactiveState(scene app.Scene) music.ReactiveState {
+	if scene.Combat == nil {
+		return music.ReactiveState{}
+	}
+
+	state := music.ReactiveState{BattleTheme: music.BattleThemeStandard}
+	switch {
+	case strings.EqualFold(scene.Combat.NodeType, "Boss"):
+		state.BattleTheme = music.BattleThemeBoss
+	case strings.EqualFold(scene.Combat.NodeType, "Corrupted"):
+		state.BattleTheme = music.BattleThemeCorrupted
+	}
+
+	playerRatio := ratio(scene.Combat.Player.IntegrityCurrent, scene.Combat.Player.IntegrityMax)
+	enemyRatio := ratio(scene.Combat.Enemy.IntegrityCurrent, scene.Combat.Enemy.IntegrityMax)
+	lowest := playerRatio
+	if enemyRatio < lowest {
+		lowest = enemyRatio
+	}
+	switch {
+	case lowest <= 0.25:
+		state.Intensity = 2
+	case lowest <= 0.50:
+		state.Intensity = 1
+	default:
+		state.Intensity = 0
+	}
+	return state
 }
 
 func (m model) Init() tea.Cmd {
@@ -200,14 +292,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.advancePlayback(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case mergeTickMsg:
+		if cmd := m.advanceMergeCutscene(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case tea.KeyPressMsg:
 		if msg.String() == "m" {
 			m.toggleAudio()
 			break
 		}
+		if msg.String() == "c" {
+			m.toggleCommandsModal()
+			break
+		}
 		if m.activeModal != nil {
 			switch msg.String() {
-			case "i", "esc", "q":
+			case "i":
+				if m.activeModal.kind == modalKindCommands {
+					m.openChoiceModal()
+				} else {
+					m.activeModal = nil
+				}
+			case "esc", "q":
 				m.activeModal = nil
 			case "ctrl+c":
 				_, _, _ = m.session.Apply("quit")
@@ -218,10 +324,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.scene.Combat != nil && m.handleCombatLogKey(msg.String()) {
 			break
 		}
-		if m.playback != nil {
+		if msg.String() == "f" && (m.scene.Combat != nil || m.playback != nil) {
+			if cmd := m.togglePlaybackFastForward(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			break
+		}
+		if m.playback != nil || m.mergeCutsceneActive() {
 			switch msg.String() {
-			case "space", " ":
-				if cmd := m.fastForwardPlayback(); cmd != nil {
+			case "space", " ", "enter":
+				var cmd tea.Cmd
+				if m.playback != nil {
+					cmd = m.acceleratePlayback()
+				} else {
+					cmd = m.fastForwardMergeCutscene()
+				}
+				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			case "q", "ctrl+c":
@@ -237,6 +355,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedIndex = nextChoice(m.scene, m.selectedIndex)
 		case "i":
 			m.openChoiceModal()
+		case "x":
+			if cmd := m.handleNodeShortcut("view:maintenance"); cmd != nil {
+				cmds = append(cmds, cmd...)
+			}
+		case "r":
+			if cmd := m.handleNodeShortcut("rotate"); cmd != nil {
+				cmds = append(cmds, cmd...)
+			}
 		case "enter":
 			choice, ok := selectedChoice(m.scene, m.selectedIndex)
 			if ok {
@@ -293,8 +419,14 @@ func (m *model) handleSceneTransition(previous app.Scene, next app.Scene, events
 	cmds := []tea.Cmd{}
 	m.activeModal = nil
 	m.switchMusic(next)
+	m.mergeCutscene = nil
 
 	switch {
+	case next.Kind == "merge_result" && next.Merge != nil:
+		m.scene = next
+		m.selectedIndex = clampSelection(0, m.scene)
+		m.syncBarWidth()
+		return []tea.Cmd{m.beginMergeCutscene(next)}
 	case isCombatEntry(previous, next):
 		m.resetCombatLog()
 		m.scene = next
@@ -353,42 +485,58 @@ func (m *model) beginPlayback(resolvedScene app.Scene, beats []playbackBeat) tea
 	m.playback = &playbackSequence{
 		resolvedScene: resolvedScene,
 		beats:         beats,
+		fast:          m.playbackAutoFast,
 	}
-	return m.advancePlayback()
+	return m.startNextPlaybackBeat()
+}
+
+func (m *model) startNextPlaybackBeat() tea.Cmd {
+	if m.playback == nil {
+		return nil
+	}
+	if m.playback.index >= len(m.playback.beats) {
+		return m.finishPlayback()
+	}
+
+	beat := m.playback.beats[m.playback.index]
+	m.playback.index++
+	m.playback.stage = playbackStageStart
+	m.playback.visibleRunes = 0
+	m.playback.pulseCooldown = 0
+	m.playback.committed = false
+	m.playbackLines = nil
+	m.playbackActor = beat.actor
+	m.playbackImpact = beat.impact
+	m.playbackPhase = beat.phase
+	m.playbackPhaseStyle = beat.phaseStyle
+	m.playbackTyping = false
+	return playbackTickCmd(m.playbackDelay(beat.startDelay))
 }
 
 func (m *model) advancePlayback() tea.Cmd {
 	if m.playback == nil {
 		return nil
 	}
-	if m.playback.index >= len(m.playback.beats) {
-		resolved := m.playback.resolvedScene
-		m.playback = nil
-		m.playbackLines = nil
-		m.playbackActor = ""
-		m.playbackImpact = false
-		m.playbackPhase = ""
-		m.playbackPhaseStyle = ""
-		m.playCue(m.sceneEntryCue(app.Scene{Kind: "combat"}, resolved, nil))
-		if cmd := m.maybeAdvanceEnemy(); cmd != nil {
-			return cmd
-		}
-		if !retainsCombatLog(m.scene) {
-			m.clearCombatLog()
-		}
-		return nil
+	current := currentPlaybackBeat(m.playback)
+	if current == nil {
+		return m.finishPlayback()
 	}
 
-	beat := m.playback.beats[m.playback.index]
-	m.playback.index++
-	m.playbackLines = append([]string(nil), beat.lines...)
-	m.playbackActor = beat.actor
-	m.playbackImpact = beat.impact
-	m.playbackPhase = beat.phase
-	m.playbackPhaseStyle = beat.phaseStyle
-	m.appendCombatLog(beat.lines)
-	m.playCue(beat.cue)
+	switch m.playback.stage {
+	case playbackStageStart:
+		return m.beginPlaybackBeat(*current)
+	case playbackStageType:
+		return m.typePlaybackBeat(*current)
+	case playbackStageHold:
+		m.playbackLines = nil
+		m.playbackTyping = false
+		return m.startNextPlaybackBeat()
+	default:
+		return nil
+	}
+}
 
+func (m *model) beginPlaybackBeat(beat playbackBeat) tea.Cmd {
 	cmds := []tea.Cmd{}
 	if beat.applyScene {
 		m.scene = m.playback.resolvedScene
@@ -396,9 +544,81 @@ func (m *model) advancePlayback() tea.Cmd {
 		m.syncBarWidth()
 		cmds = append(cmds, m.syncBars())
 	}
-
-	cmds = append(cmds, playbackTickCmd(beat.delay))
+	m.playUICue(audio.EventLogLine)
+	m.playCue(beat.cue)
+	m.playback.stage = playbackStageType
+	m.playbackTyping = true
+	if visible := playbackVisibleLine(beat.line, 0); visible != "" {
+		m.playbackLines = []string{visible}
+	} else {
+		m.playbackLines = nil
+	}
+	if len([]rune(beat.line)) == 0 {
+		return tea.Batch(append(cmds, m.finishPlaybackBeat(beat))...)
+	}
+	cmds = append(cmds, playbackTickCmd(m.playbackDelay(playbackTypingDelay)))
 	return tea.Batch(cmds...)
+}
+
+func (m *model) typePlaybackBeat(beat playbackBeat) tea.Cmd {
+	runes := []rune(beat.line)
+	if m.playback.visibleRunes >= len(runes) {
+		return m.finishPlaybackBeat(beat)
+	}
+	revealed := runes[m.playback.visibleRunes]
+	for i := 0; i < m.playbackTypingStep() && m.playback.visibleRunes < len(runes); i++ {
+		revealed = runes[m.playback.visibleRunes]
+		m.playback.visibleRunes++
+		if !isTypingSilentRune(revealed) && m.playback.pulseCooldown <= 0 {
+			m.playUICue(audio.EventTypingPulse)
+			m.playback.pulseCooldown = m.playbackPulseGap()
+		}
+		delay := m.playbackDelay(playbackRuneDelay(revealed))
+		if m.playback.pulseCooldown > 0 {
+			m.playback.pulseCooldown -= delay
+		}
+	}
+	m.playbackLines = []string{playbackVisibleLine(beat.line, m.playback.visibleRunes)}
+	if m.playback.visibleRunes >= len(runes) {
+		return m.finishPlaybackBeat(beat)
+	}
+	return playbackTickCmd(m.playbackDelay(playbackRuneDelay(revealed)))
+}
+
+func (m *model) finishPlaybackBeat(beat playbackBeat) tea.Cmd {
+	if !m.playback.committed {
+		m.appendCombatLog([]string{beat.line})
+		if beat.sequenceEnd {
+			m.appendCombatLog([]string{""})
+		}
+		m.playback.committed = true
+	}
+	m.playbackLines = nil
+	m.playbackTyping = false
+	m.playback.stage = playbackStageHold
+	return playbackTickCmd(m.playbackDelay(beat.holdDelay))
+}
+
+func (m *model) finishPlayback() tea.Cmd {
+	if m.playback == nil {
+		return nil
+	}
+	resolved := m.playback.resolvedScene
+	m.playback = nil
+	m.playbackLines = nil
+	m.playbackActor = ""
+	m.playbackImpact = false
+	m.playbackPhase = ""
+	m.playbackPhaseStyle = ""
+	m.playbackTyping = false
+	m.playCue(m.sceneEntryCue(app.Scene{Kind: "combat"}, resolved, nil))
+	if cmd := m.maybeAdvanceEnemy(); cmd != nil {
+		return cmd
+	}
+	if !retainsCombatLog(m.scene) {
+		m.clearCombatLog()
+	}
+	return nil
 }
 
 func (m *model) fastForwardPlayback() tea.Cmd {
@@ -406,40 +626,91 @@ func (m *model) fastForwardPlayback() tea.Cmd {
 		return nil
 	}
 
-	applyScene := false
-	for _, beat := range m.playback.beats[m.playback.index-1:] {
-		if beat.applyScene {
-			applyScene = true
-			break
-		}
+	cmds := []tea.Cmd{}
+	remaining := remainingSequenceBeats(m.playback)
+	if len(remaining) == 0 {
+		return m.finishPlayback()
 	}
-	if applyScene {
+
+	current := remaining[0]
+	currentStarted := m.playback.stage != playbackStageStart
+	if current.applyScene && !currentStarted {
 		m.scene = m.playback.resolvedScene
 		m.selectedIndex = clampSelection(0, m.scene)
 		m.syncBarWidth()
+		cmds = append(cmds, m.syncBars())
 	}
 
-	remainingBeats := remainingPlaybackBeats(m.playback)
-	m.appendCombatLog(remainingPlaybackLines(m.playback))
-	m.playCue(dominantPlaybackCue(remainingBeats))
+	if !m.playback.committed {
+		m.appendCombatLog([]string{current.line})
+	}
+
+	toAppend := make([]string, 0, len(remaining))
+	for i, beat := range remaining {
+		if i == 0 {
+			if beat.sequenceEnd {
+				toAppend = append(toAppend, "")
+			}
+			continue
+		}
+		if beat.applyScene {
+			m.scene = m.playback.resolvedScene
+			m.selectedIndex = clampSelection(0, m.scene)
+			m.syncBarWidth()
+			cmds = append(cmds, m.syncBars())
+		}
+		toAppend = append(toAppend, beat.line)
+		if beat.sequenceEnd {
+			toAppend = append(toAppend, "")
+			break
+		}
+	}
+	if len(toAppend) > 0 {
+		m.appendCombatLog(toAppend)
+	}
+
+	remainingCues := remainingSequenceCues(m.playback, currentStarted)
+	m.playCue(dominantPlaybackCue(remainingCues))
 	m.playback = nil
 	m.playbackLines = nil
 	m.playbackActor = ""
 	m.playbackImpact = false
 	m.playbackPhase = ""
 	m.playbackPhaseStyle = ""
+	m.playbackTyping = false
 	m.playCue(m.sceneEntryCue(app.Scene{Kind: "combat"}, m.scene, nil))
 
-	cmds := []tea.Cmd{}
-	if applyScene {
-		cmds = append(cmds, m.syncBars())
-	}
 	if cmd := m.maybeAdvanceEnemy(); cmd != nil {
 		cmds = append(cmds, cmd)
 	} else if !retainsCombatLog(m.scene) {
 		m.clearCombatLog()
 	}
 	return tea.Batch(cmds...)
+}
+
+func (m *model) acceleratePlayback() tea.Cmd {
+	if m.playback == nil {
+		return nil
+	}
+	m.playback.fast = true
+	switch m.playback.stage {
+	case playbackStageStart, playbackStageHold:
+		return m.advancePlayback()
+	default:
+		return nil
+	}
+}
+
+func (m *model) togglePlaybackFastForward() tea.Cmd {
+	m.playbackAutoFast = !m.playbackAutoFast
+	if m.playback == nil {
+		return nil
+	}
+	m.playback.fast = m.playbackAutoFast
+	if m.playback.fast && (m.playback.stage == playbackStageStart || m.playback.stage == playbackStageHold) {
+		return m.advancePlayback()
+	}
+	return nil
 }
 
 func (m *model) maybeAdvanceEnemy() tea.Cmd {
@@ -469,12 +740,76 @@ func (m *model) handleEnemyAdvance(previous app.Scene, next app.Scene, events []
 	return []tea.Cmd{m.beginPlayback(next, buildActionBeats(actorEnemy, previous, events))}
 }
 
+func (m model) mergeCutsceneActive() bool {
+	return m.mergeCutscene != nil && !m.mergeCutscene.complete
+}
+
+func (m *model) beginMergeCutscene(scene app.Scene) tea.Cmd {
+	m.mergeCutscene = &mergeCutscene{
+		beats: buildMergeBeats(scene),
+	}
+	return m.advanceMergeCutscene()
+}
+
+func (m *model) advanceMergeCutscene() tea.Cmd {
+	if m.mergeCutscene == nil || m.mergeCutscene.complete {
+		return nil
+	}
+	if m.mergeCutscene.index >= len(m.mergeCutscene.beats) {
+		m.mergeCutscene.complete = true
+		return nil
+	}
+
+	beat := m.mergeCutscene.beats[m.mergeCutscene.index]
+	m.mergeCutscene.index++
+	m.mergeCutscene.phase = beat.phase
+	m.mergeCutscene.progress = beat.progress
+	if beat.line != "" {
+		m.mergeCutscene.stream = append(m.mergeCutscene.stream, beat.line)
+	}
+	m.playCue(beat.cue)
+	if beat.final || m.mergeCutscene.index >= len(m.mergeCutscene.beats) {
+		m.mergeCutscene.complete = true
+		return nil
+	}
+	return tea.Tick(beat.delay, func(time.Time) tea.Msg {
+		return mergeTickMsg{}
+	})
+}
+
+func (m *model) fastForwardMergeCutscene() tea.Cmd {
+	if m.mergeCutscene == nil || m.mergeCutscene.complete {
+		return nil
+	}
+	for ; m.mergeCutscene.index < len(m.mergeCutscene.beats); m.mergeCutscene.index++ {
+		beat := m.mergeCutscene.beats[m.mergeCutscene.index]
+		m.mergeCutscene.phase = beat.phase
+		m.mergeCutscene.progress = beat.progress
+		if beat.line != "" {
+			m.mergeCutscene.stream = append(m.mergeCutscene.stream, beat.line)
+		}
+		if beat.final {
+			m.playCue(beat.cue)
+		}
+	}
+	m.mergeCutscene.complete = true
+	return nil
+}
+
 func (m *model) playCue(event audio.Event) {
 	if m.audio == nil || event == "" {
 		return
 	}
 	m.audioCounter++
 	m.audio.Play(event, m.audioSeed(event))
+}
+
+func (m *model) playUICue(event audio.Event) {
+	if m.audio == nil || event == "" {
+		return
+	}
+	m.audioCounter++
+	m.audio.PlayUI(event, m.audioSeed(event))
 }
 
 func (m model) audioSeed(event audio.Event) int64 {
@@ -521,7 +856,7 @@ func shouldPlaySelectCue(choiceID string, previous app.Scene, next app.Scene, ev
 	if choiceID == "quit" || choiceID == "" || len(events) == 0 {
 		return false
 	}
-	if strings.HasPrefix(choiceID, "ability:") || choiceID == "isolate" || choiceID == "node:" || choiceID == "inspect" {
+	if strings.HasPrefix(choiceID, "ability:") || choiceID == "isolate" || choiceID == "node:" || choiceID == "inspect" || choiceID == "merge:confirm" {
 		return false
 	}
 	if next.Kind == "starter_select" {
@@ -598,6 +933,8 @@ func (m model) render() string {
 	switch {
 	case m.scene.Kind == "combat" && m.scene.Combat != nil:
 		sections = append(sections, m.renderCombatLayout(width))
+	case m.scene.Kind == "merge_result" && m.scene.Merge != nil:
+		sections = append(sections, m.renderMergeResult(width))
 	case m.scene.Kind == "node_select" && m.scene.NodeMap != nil:
 		sections = append(sections, m.renderNodeSelect(width))
 	default:
@@ -627,6 +964,13 @@ func (m model) renderCombatLayout(width int) string {
 
 func (m model) renderCombat(width int) string {
 	return m.renderCombatLayout(width)
+}
+
+func (m model) renderMergeResult(width int) string {
+	return strings.Join([]string{
+		panel("MERGE SEQUENCE", m.renderMergeSequenceLines(), width),
+		m.renderSceneMenu(width),
+	}, "\n\n")
 }
 
 func (m model) renderCombatEncounterLines(width int, wide bool) []string {
@@ -671,6 +1015,79 @@ func (m model) renderCombatEncounterLines(width int, wide bool) []string {
 		enemyLines[1],
 		playerLines[0],
 		playerLines[1],
+	}
+}
+
+func (m model) renderMergeSequenceLines() []string {
+	lines := []string{
+		colorize(ansiDim+ansiRed, "<< fork // absorb // rewrite >>"),
+	}
+
+	if m.mergeCutscene != nil {
+		lines = append(lines, colorize(ansiBold+ansiYellow, m.mergeCutscene.phase))
+		lines = append(lines, mergeProgressBar(m.mergeCutscene.progress))
+		lines = append(lines, "")
+		for _, line := range m.mergeCutscene.stream {
+			lines = append(lines, stylizeMergeTrace(line))
+		}
+		if !m.mergeCutscene.complete {
+			lines = append(lines, "")
+			lines = append(lines, colorize(ansiDim, "Sequence running. Enter or Space fast-forward."))
+		} else {
+			lines = append(lines, "")
+			lines = append(lines, colorize(ansiBold+ansiGreen, ":: merge accepted ::"))
+			lines = append(lines, "")
+			lines = append(lines, renderMergeCardLines(m.scene.Merge)...)
+		}
+		return lines
+	}
+
+	lines = append(lines,
+		colorize(ansiBold+ansiYellow, "MERGE PIPELINE STANDBY"),
+		mergeProgressBar(0),
+	)
+	return lines
+}
+
+func renderMergeCardLines(merge *app.MergeView) []string {
+	if merge == nil {
+		return []string{colorize(ansiDim, "Merged daemon telemetry unavailable.")}
+	}
+	return []string{
+		colorize(ansiDim+ansiCyan, "/* merged daemon */"),
+		colorize(ansiBold+ansiGreen, merge.ResultName),
+		fmt.Sprintf("%s | Trait: %s", colorize(ansiCyan, fmt.Sprintf("%d/%d HP", merge.Daemon.IntegrityCurrent, merge.Daemon.IntegrityMax)), colorize(ansiYellow, merge.Trait)),
+		fmt.Sprintf("Statuses: %s", strings.Join(merge.Daemon.Statuses, ", ")),
+		"",
+		fmt.Sprintf("%s drift: %s", merge.FocusStat, colorize(ansiBold+ansiCyan, fmt.Sprintf("%d -> %d", merge.StatBefore, merge.StatAfter))),
+		fmt.Sprintf("Stabilization restore: %s", colorize(ansiBold+ansiGreen, fmt.Sprintf("+%d", merge.Healed))),
+		fmt.Sprintf("New slot 3: %s", colorize(ansiBold+ansiRed, merge.Ability)),
+		fmt.Sprintf("Fork archive: %s", colorize(ansiDim+ansiRed, merge.ForkName)),
+	}
+}
+
+func mergeProgressBar(progress int) string {
+	progress = clamp(progress, 0, 100)
+	width := 28
+	filled := width * progress / 100
+	left := strings.Repeat("=", filled)
+	right := strings.Repeat("-", width-filled)
+	bar := "[" + left + right + "]"
+	return colorize(ansiRed, bar) + colorize(ansiDim, fmt.Sprintf(" %3d%%", progress))
+}
+
+func stylizeMergeTrace(line string) string {
+	switch {
+	case strings.Contains(line, "warning"):
+		return colorize(ansiYellow, line)
+	case strings.Contains(line, "fork"):
+		return colorize(ansiDim+ansiRed, line)
+	case strings.Contains(line, "base"), strings.Contains(line, "slot 3"):
+		return colorize(ansiCyan, line)
+	case strings.Contains(line, "seal"), strings.Contains(line, "commit"):
+		return colorize(ansiDim+ansiYellow, line)
+	default:
+		return colorize(ansiDim+ansiCyan, line)
 	}
 }
 
@@ -923,13 +1340,27 @@ func (m *model) clampCombatLogScroll() {
 	m.combatLogScroll = clamp(m.combatLogScroll, 0, maxStart)
 }
 
-func (m model) combatLogRows(width int) []string {
-	if len(m.combatLogLines) == 0 {
-		return []string{colorize(ansiDim, "Awaiting combat telemetry...")}
+func (m model) currentPlaybackLogLine() string {
+	if m.playback == nil || !m.playbackTyping {
+		return ""
 	}
-	styled := make([]string, 0, len(m.combatLogLines))
+	line := currentPlaybackFullLine(m.playback)
+	if line == "" {
+		return ""
+	}
+	return formatCombatLogLineProgress(line, m.playback.visibleRunes)
+}
+
+func (m model) combatLogRows(width int) []string {
+	styled := make([]string, 0, len(m.combatLogLines)+1)
 	for _, line := range m.combatLogLines {
 		styled = append(styled, formatCombatLogLine(line))
+	}
+	if live := m.currentPlaybackLogLine(); live != "" {
+		styled = append(styled, live)
+	}
+	if len(styled) == 0 {
+		return []string{colorize(ansiDim, "Awaiting combat telemetry...")}
 	}
 	return wrapLines(styled, width)
 }
@@ -967,6 +1398,19 @@ func formatCombatLogLine(line string) string {
 	return tag + " " + body
 }
 
+func formatCombatLogLineProgress(line string, visibleRunes int) string {
+	if visibleRunes <= 0 {
+		return ""
+	}
+	class := classifyCombatLogLine(line)
+	tag := combatLogTag(class)
+	body := styleCombatProgressBody(class, playbackVisibleLine(line, visibleRunes))
+	if tag == "" {
+		return body
+	}
+	return tag + " " + body
+}
+
 func classifyCombatLogLine(line string) combatLogClass {
 	switch {
 	case strings.HasPrefix(line, "Entered "), strings.HasPrefix(line, "Encountered "):
@@ -979,7 +1423,7 @@ func classifyCombatLogLine(line string) combatLogClass {
 		return combatLogRoll
 	case strings.HasPrefix(line, "Isolation chance "), strings.HasPrefix(line, "Isolation successful."), strings.HasPrefix(line, "Isolation failed."):
 		return combatLogCapture
-	case strings.Contains(line, " restored ") && strings.Contains(line, " Integrity"):
+	case strings.Contains(line, " restored ") && strings.Contains(line, " Health"):
 		return combatLogHeal
 	case strings.Contains(line, " took ") && strings.HasSuffix(line, " damage."):
 		return combatLogHit
@@ -1069,6 +1513,41 @@ func styleCombatLogBody(class combatLogClass, line string) string {
 		return colorize(ansiDim+ansiCyan, line)
 	default:
 		return emphasizeCombatActors(line)
+	}
+}
+
+func styleCombatProgressBody(class combatLogClass, line string) string {
+	switch class {
+	case combatLogPrelude:
+		return colorize(ansiDim+ansiCyan, line)
+	case combatLogTurn:
+		if strings.HasPrefix(line, "Enemy") {
+			return colorize(ansiBold+ansiRed, line)
+		}
+		return colorize(ansiBold+ansiCyan, line)
+	case combatLogAction:
+		if strings.HasPrefix(line, "Enemy") {
+			return colorize(ansiBold+ansiRed, line)
+		}
+		return colorize(ansiBold+ansiCyan, line)
+	case combatLogRoll:
+		return colorize(ansiBold+ansiYellow, line)
+	case combatLogCapture:
+		return colorize(ansiBold+ansiGreen, line)
+	case combatLogHit:
+		return colorize(ansiBold+ansiYellow, line)
+	case combatLogHeal, combatLogGain:
+		return colorize(ansiBold+ansiGreen, line)
+	case combatLogStatus:
+		return colorize(ansiBold+ansiCyan, line)
+	case combatLogMiss, combatLogDot, combatLogBackfire:
+		return colorize(ansiBold+ansiYellow, line)
+	case combatLogCrash:
+		return colorize(ansiBold+ansiRed, line)
+	case combatLogLore:
+		return colorize(ansiDim+ansiCyan, line)
+	default:
+		return line
 	}
 }
 
@@ -1205,7 +1684,7 @@ func styleCombatCaptureLine(line string) string {
 	case strings.HasPrefix(line, "Isolation successful."):
 		return colorize(ansiBold+ansiGreen, line)
 	case strings.Contains(line, "above 50%"):
-		return colorize(ansiYellow, "Isolation failed.") + colorize(ansiDim, " Target Integrity is above ") + colorize(ansiBold+ansiYellow, "50%") + colorize(ansiDim, ".")
+		return colorize(ansiYellow, "Isolation failed.") + colorize(ansiDim, " Target Health is above ") + colorize(ansiBold+ansiYellow, "50%") + colorize(ansiDim, ".")
 	case strings.Contains(line, "resisted the breach"):
 		return colorize(ansiYellow, "Isolation failed.") + colorize(ansiDim, " The daemon resisted the breach.")
 	default:
@@ -1370,7 +1849,10 @@ func (m model) renderNodeSelect(width int) string {
 	detailLines := nodeDetailLines(*m.scene.NodeMap, focusedID)
 	lines := append(mapLines, "")
 	lines = append(lines, detailLines...)
-	return panel("NETWORK MAP", lines, width)
+	return strings.Join([]string{
+		panel("NETWORK MAP", lines, width),
+		m.renderSceneMenu(width),
+	}, "\n\n")
 }
 
 func renderLogo(scene app.Scene, width int) string {
@@ -1422,6 +1904,8 @@ func sceneHeader(scene app.Scene) string {
 		return "ACTIVE SLOT"
 	case "game_over":
 		return "RUN SUMMARY"
+	case "merge_confirm":
+		return "MERGE PREVIEW"
 	default:
 		return strings.ToUpper(scene.Title)
 	}
@@ -1434,6 +1918,12 @@ func decorateLines(scene app.Scene) []string {
 	if scene.Kind == "maintenance" {
 		return decorateMaintenanceLines(scene.Lines)
 	}
+	if scene.Kind == "reward" {
+		return decorateRewardLines(scene.Lines)
+	}
+	if scene.Kind == "merge_confirm" {
+		return decorateMergeConfirmLines(scene.Lines)
+	}
 	lines := make([]string, 0, len(scene.Lines)+4)
 	for _, line := range scene.Lines {
 		if strings.TrimSpace(line) == "" {
@@ -1443,6 +1933,84 @@ func decorateLines(scene app.Scene) []string {
 		lines = append(lines, stylizeLine(line))
 	}
 	return lines
+}
+
+func decorateRewardLines(lines []string) []string {
+	out := make([]string, 0, len(lines)+8)
+	if len(lines) > 0 {
+		out = append(out, colorize(ansiDim, ":: uplink recovered - node cache unpacked ::"))
+		out = append(out, "")
+	}
+
+	insertedAccessHeader := false
+	insertedTraceHeader := false
+	for _, line := range lines {
+		switch {
+		case strings.TrimSpace(line) == "":
+			out = append(out, "")
+		case strings.Contains(line, " gained +"):
+			out = append(out, styleCombatGainLine(line))
+		case strings.Contains(line, " restored ") && strings.Contains(line, " Health"):
+			out = append(out, stylizeRewardIntegrityLine(line))
+		case strings.HasPrefix(line, "Maintenance charge ready "):
+			out = append(out, stylizeRewardChargeLine(line))
+		case strings.Contains(line, " joined the roster.") || strings.Contains(line, " is ready to join the roster"):
+			out = append(out, colorize(ansiDim, "/* roster sync */"))
+			out = append(out, styleCombatGainLine(line))
+		case strings.HasPrefix(line, "Unlocked "):
+			if !insertedAccessHeader {
+				out = append(out, colorize(ansiDim+ansiYellow, "// new access //"))
+				insertedAccessHeader = true
+			}
+			out = append(out, styleCombatGainLine(line))
+		case line == "Node complete.":
+			out = append(out, colorize(ansiBold+ansiGreen, line))
+		case line == "Active daemon crashed.":
+			out = append(out, colorize(ansiBold+ansiRed, line))
+		case strings.HasPrefix(line, "No capture or stat gains"):
+			out = append(out, colorize(ansiYellow, "Recovery loss.")+colorize(ansiDim, " No capture or stat gains were recovered from this node."))
+		default:
+			if !insertedTraceHeader {
+				out = append(out, colorize(ansiDim, "/* residual trace */"))
+				insertedTraceHeader = true
+			}
+			out = append(out, colorize(ansiDim+ansiCyan, line))
+		}
+	}
+
+	return out
+}
+
+func decorateMergeConfirmLines(lines []string) []string {
+	out := make([]string, 0, len(lines)+6)
+	out = append(out, colorize(ansiDim+ansiRed, "<< base // fork // splice >>"))
+	out = append(out, "")
+	for _, line := range lines {
+		switch {
+		case strings.TrimSpace(line) == "":
+			out = append(out, "")
+		case strings.HasPrefix(line, "Base: "):
+			out = append(out, colorize(ansiBold+ansiCyan, "Base: ")+stylizeTraceSummary(strings.TrimPrefix(line, "Base: "), ansiCyan))
+		case strings.HasPrefix(line, "Fork: "):
+			out = append(out, colorize(ansiBold+ansiRed, "Fork: ")+stylizeTraceSummary(strings.TrimPrefix(line, "Fork: "), ansiRed))
+		case strings.HasPrefix(line, "Result: "):
+			out = append(out, colorize(ansiBold+ansiGreen, "Result: ")+colorize(ansiBold+ansiGreen, strings.TrimPrefix(line, "Result: ")))
+		case strings.HasPrefix(line, "Trait retained: "):
+			out = append(out, colorize(ansiCyan, "Trait retained: ")+colorize(ansiYellow, strings.TrimPrefix(line, "Trait retained: ")))
+		case strings.Contains(line, " boost: "):
+			label, payload, _ := strings.Cut(line, ": ")
+			out = append(out, colorize(ansiCyan, label+": ")+colorize(ansiBold+ansiGreen, payload))
+		case strings.HasPrefix(line, "Health restore: "):
+			out = append(out, colorize(ansiCyan, "Health restore: ")+colorize(ansiBold+ansiGreen, strings.TrimPrefix(line, "Health restore: ")))
+		case strings.HasPrefix(line, "Slot 3 gain: "):
+			out = append(out, colorize(ansiCyan, "Slot 3 gain: ")+colorize(ansiBold+ansiRed, strings.TrimPrefix(line, "Slot 3 gain: ")))
+		case strings.HasSuffix(line, " will be consumed."):
+			out = append(out, colorize(ansiDim+ansiRed, line))
+		default:
+			out = append(out, stylizeLine(line))
+		}
+	}
+	return out
 }
 
 func decorateMaintenanceLines(lines []string) []string {
@@ -1498,7 +2066,7 @@ func decorateInspectLines(lines []string) []string {
 			out = append(out, "  "+stylizeTraceStatusLine(strings.TrimSpace(line)))
 		case strings.HasSuffix(line, ":"):
 			out = append(out, colorize(ansiBold+ansiGreen, line))
-		case strings.HasPrefix(line, "INT ") || strings.HasPrefix(line, "SPD ") || strings.HasPrefix(line, "STB "):
+		case strings.HasPrefix(line, "HP ") || strings.HasPrefix(line, "SPD ") || strings.HasPrefix(line, "STB "):
 			out = append(out, stylizeTraceGlossary(line))
 		case strings.Contains(line, ": "):
 			out = append(out, stylizeTraceReferenceLine(line))
@@ -1542,6 +2110,34 @@ func stylizeMaintenanceCharge(line string) string {
 	return colorize(ansiBold+ansiCyan, label+": ") + colorize(color, rest)
 }
 
+func stylizeRewardIntegrityLine(line string) string {
+	left, right, ok := strings.Cut(line, " restored ")
+	if !ok {
+		return line
+	}
+	amount, remainder, ok := strings.Cut(right, " Health")
+	if !ok {
+		return line
+	}
+	return colorize(ansiBold+ansiCyan, left) +
+		colorize(ansiDim, " restored ") +
+		colorize(ansiBold+ansiGreen, amount) +
+		colorize(ansiGreen, " Health") +
+		colorize(ansiDim, remainder)
+}
+
+func stylizeRewardChargeLine(line string) string {
+	prefix := "Maintenance charge ready "
+	count, suffix, ok := strings.Cut(strings.TrimPrefix(line, prefix), ")")
+	if !strings.HasPrefix(line, prefix) || !ok {
+		return line
+	}
+	return colorize(ansiBold+ansiCyan, "Maintenance charge ") +
+		colorize(ansiBold+ansiGreen, "ready ") +
+		colorize(ansiBold+ansiYellow, count+")") +
+		colorize(ansiDim, suffix)
+}
+
 func stylizeTraceSummary(line string, actorColor string) string {
 	parts := strings.Split(line, " | ")
 	if len(parts) == 0 {
@@ -1558,7 +2154,7 @@ func stylizeTraceSummary(line string, actorColor string) string {
 				continue
 			}
 			out = append(out, colorize(ansiBold+actorColor, head+" ")+colorize(ansiBold, tail))
-		case strings.Contains(part, " INT"):
+		case strings.Contains(part, " HP"):
 			out = append(out, colorize(ansiBold+ansiYellow, part))
 		case strings.HasPrefix(part, "SPD "):
 			out = append(out, colorize(ansiBold+ansiCyan, part))
@@ -1660,23 +2256,13 @@ func stylizeSignedTerm(part string) string {
 }
 
 func (m model) controlsHint() string {
-	audioHint := " | m toggle | " + m.audioStatus()
-	if m.audio == nil || !m.audio.Available() {
-		audioHint = " | " + m.audioStatus()
-	}
-	if m.activeModal != nil {
-		return fmt.Sprintf("controls: i/esc/q close detail%s | scene=%s", audioHint, m.scene.Kind)
-	}
 	if m.playback != nil {
-		return fmt.Sprintf("controls: gg/G/ctrl+u/ctrl+d log | space fast-forward | q quit%s | scene=%s", audioHint, m.scene.Kind)
+		return "hint: enter/space accelerate • f toggle fast-forward • press c for command sheet"
 	}
-	if m.scene.Combat != nil {
-		return fmt.Sprintf("controls: j/k menu | i detail | gg/G/ctrl+u/ctrl+d log | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
+	if m.mergeCutsceneActive() {
+		return "hint: enter/space fast-forward • press c for command sheet"
 	}
-	if m.selectedChoiceDetails() != nil {
-		return fmt.Sprintf("controls: up/down or j/k | i detail | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
-	}
-	return fmt.Sprintf("controls: up/down or j/k | enter select | q quit%s | scene=%s", audioHint, m.scene.Kind)
+	return "hint: press c for command sheet"
 }
 
 func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool) string {
@@ -1684,12 +2270,13 @@ func renderMenu(choices []app.Choice, selectedIndex int, width int, locked bool)
 }
 
 func (m model) renderSceneMenu(width int) string {
-	lines := renderMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+	locked := m.playback != nil || m.mergeCutsceneActive()
+	lines := renderMenuLines(m.scene.Choices, m.selectedIndex, locked)
 	if m.scene.Kind == "maintenance" {
-		lines = renderMaintenanceMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+		lines = renderMaintenanceMenuLines(m.scene.Choices, m.selectedIndex, locked)
 	}
 	detail := m.selectedChoiceDetails()
-	if detail != nil && m.playback == nil {
+	if detail != nil && !locked {
 		lines = append(lines, "")
 		if m.scene.Kind == "maintenance" {
 			lines = append(lines, colorize(ansiDim+ansiCyan, ":: service note ::"))
@@ -1710,8 +2297,17 @@ func (m model) renderSceneMenu(width int) string {
 }
 
 func (m model) renderCombatMenuLines() []string {
-	lines := renderMenuLines(enabledChoices(m.scene), m.selectedIndex, m.playback != nil)
+	lines := renderMenuLines(m.scene.Choices, m.selectedIndex, m.playback != nil)
 	if m.playback != nil {
+		if n := len(lines); n > 0 && strings.Contains(lines[n-1], "fast-forward") {
+			lines = lines[:n-1]
+			if len(lines) > 0 && lines[len(lines)-1] == "" {
+				lines = lines[:len(lines)-1]
+			}
+		}
+		lines = append(lines, "")
+		lines = append(lines, colorize(ansiYellow, "Sequence running. Enter or Space accelerate."))
+		lines = append(lines, colorize(ansiDim, fmt.Sprintf("f toggles fast-forward (%s).", onOffLabel(m.playback.fast))))
 		return lines
 	}
 	detail := m.selectedChoiceDetails()
@@ -1732,42 +2328,54 @@ func (m model) renderCombatMenuLines() []string {
 
 func renderMenuLines(choices []app.Choice, selectedIndex int, locked bool) []string {
 	lines := []string{}
-	for i, choice := range choices {
+	enabledIndex := 0
+	for _, choice := range choices {
 		prefix := "  [ ]"
 		label := choice.Label
 		if locked {
 			lines = append(lines, colorize(ansiDim, fmt.Sprintf("%s %s", prefix, label)))
 			continue
 		}
-		if i == selectedIndex {
+		if !choice.Enabled {
+			lines = append(lines, colorize(ansiDim, fmt.Sprintf("%s %s", prefix, label)))
+			continue
+		}
+		if enabledIndex == selectedIndex {
 			prefix = colorize(ansiGreen, ">> [*]")
 			label = colorize(ansiBold+ansiGreen, choice.Label)
 		}
 		lines = append(lines, fmt.Sprintf("%s %s", prefix, label))
+		enabledIndex++
 	}
 	if len(lines) == 0 {
 		lines = append(lines, colorize(ansiDim, "No available actions"))
 	}
 	if locked {
-		lines = append(lines, "", colorize(ansiYellow, "Sequence running. Space fast-forward."))
+		lines = append(lines, "", colorize(ansiYellow, "Sequence running. Enter or Space fast-forward."))
 	}
 	return lines
 }
 
 func renderMaintenanceMenuLines(choices []app.Choice, selectedIndex int, locked bool) []string {
 	lines := []string{}
-	for i, choice := range choices {
+	enabledIndex := 0
+	for _, choice := range choices {
 		prefix := "  [ ]"
 		label := maintenanceChoiceLabel(choice)
 		if locked {
 			lines = append(lines, colorize(ansiDim, fmt.Sprintf("%s %s", prefix, choice.Label)))
 			continue
 		}
-		if i == selectedIndex {
+		if !choice.Enabled {
+			lines = append(lines, colorize(ansiDim, fmt.Sprintf("%s %s", prefix, choice.Label)))
+			continue
+		}
+		if enabledIndex == selectedIndex {
 			prefix = colorize(ansiGreen, ">> [*]")
 			label = colorize(ansiBold+ansiGreen, choice.Label)
 		}
 		lines = append(lines, fmt.Sprintf("%s %s", prefix, label))
+		enabledIndex++
 	}
 	if len(lines) == 0 {
 		lines = append(lines, colorize(ansiDim, "No available actions"))
@@ -1828,7 +2436,35 @@ func (m *model) openChoiceModal() {
 	}
 	copyDetail := *detail
 	copyDetail.Lines = append([]string(nil), detail.Lines...)
-	m.activeModal = &copyDetail
+	m.activeModal = &modalView{
+		kind:    modalKindDetail,
+		title:   copyDetail.Title,
+		preview: copyDetail.Preview,
+		lines:   copyDetail.Lines,
+	}
+}
+
+func (m *model) toggleCommandsModal() {
+	if m.activeModal != nil && m.activeModal.kind == modalKindCommands {
+		m.activeModal = nil
+		return
+	}
+	m.activeModal = m.commandsModal()
+}
+
+func (m *model) commandsModal() *modalView {
+	lines := make([]string, 0, 16)
+	lines = append(lines, colorize(ansiBold+ansiGreen, "Available now"))
+	lines = append(lines, m.sceneCommandLines()...)
+	lines = append(lines, "")
+	lines = append(lines, colorize(ansiBold+ansiCyan, "Global"))
+	lines = append(lines, m.globalCommandLines()...)
+	return &modalView{
+		kind:    modalKindCommands,
+		title:   "Command Sheet",
+		preview: "Current commands for this scene and your global keys.",
+		lines:   lines,
+	}
 }
 
 func (m model) selectedChoiceDetails() *app.ChoiceDetails {
@@ -1846,11 +2482,15 @@ func (m model) renderModalOverlay(base string) string {
 
 	screenWidth := max(m.width, m.panelWidth()+4)
 	modalWidth := clamp(m.panelWidth()-10, 38, 68)
-	lines := []string{colorize(ansiBold+ansiGreen, m.activeModal.Preview), ""}
-	lines = append(lines, m.activeModal.Lines...)
-	lines = append(lines, "", colorize(ansiDim, "Close with i, Esc, or q."))
+	lines := []string{colorize(ansiBold+ansiGreen, m.activeModal.preview), ""}
+	lines = append(lines, m.activeModal.lines...)
+	closeHint := "Close with c, Esc, or q."
+	if m.activeModal.kind == modalKindDetail {
+		closeHint = "Close with i, Esc, or q."
+	}
+	lines = append(lines, "", colorize(ansiDim, closeHint))
 
-	modal := panel(m.activeModal.Title, lines, modalWidth)
+	modal := panel(m.activeModal.title, lines, modalWidth)
 	baseRows := strings.Split(base, "\n")
 	modalRows := strings.Split(modal, "\n")
 	top := max(0, (len(baseRows)-len(modalRows))/2)
@@ -1865,6 +2505,132 @@ func (m model) renderModalOverlay(base string) string {
 		baseRows[idx] = centered
 	}
 	return strings.Join(baseRows, "\n")
+}
+
+func (m *model) handleNodeShortcut(choiceID string) []tea.Cmd {
+	if m.scene.Kind != "node_select" || m.playback != nil || m.activeModal != nil {
+		return nil
+	}
+	return m.applyChoice(choiceID)
+}
+
+func (m model) sceneCommandLines() []string {
+	switch {
+	case m.playback != nil:
+		lines := []string{
+			colorize(ansiYellow, "enter / space") + colorize(ansiDim, " accelerate the active sequence"),
+			colorize(ansiBold+ansiCyan, "f") + colorize(ansiDim, " toggle playback fast-forward ("+onOffLabel(m.playback.fast)+")"),
+		}
+		if m.scene.Combat != nil {
+			lines = append(lines,
+				colorize(ansiCyan, "gg / G")+colorize(ansiDim, " jump combat log to top/bottom"),
+				colorize(ansiCyan, "ctrl+u / ctrl+d")+colorize(ansiDim, " scroll combat log"),
+			)
+		}
+		return lines
+	case m.mergeCutsceneActive():
+		return []string{
+			colorize(ansiYellow, "enter / space") + colorize(ansiDim, " fast-forward the active sequence"),
+		}
+	case m.scene.Kind == "node_select":
+		return []string{
+			colorize(ansiCyan, "up/down or j/k") + colorize(ansiDim, " change focused node"),
+			colorize(ansiGreen, "enter") + colorize(ansiDim, " enter the focused reachable node"),
+			colorize(ansiBold+ansiCyan, "x") + colorize(ansiDim, " open maintenance console"),
+			m.rotateLeadCommandLine(),
+		}
+	case m.scene.Combat != nil:
+		lines := []string{
+			colorize(ansiCyan, "up/down or j/k") + colorize(ansiDim, " change combat selection"),
+			colorize(ansiGreen, "enter") + colorize(ansiDim, " confirm the selected action"),
+			colorize(ansiBold+ansiCyan, "f") + colorize(ansiDim, " toggle playback fast-forward ("+onOffLabel(m.playbackAutoFast)+")"),
+			colorize(ansiBold+ansiCyan, "i") + colorize(ansiDim, " open command detail"),
+			colorize(ansiCyan, "gg / G") + colorize(ansiDim, " jump combat log to top/bottom"),
+			colorize(ansiCyan, "ctrl+u / ctrl+d") + colorize(ansiDim, " scroll combat log"),
+		}
+		return lines
+	default:
+		lines := []string{
+			colorize(ansiCyan, "up/down or j/k") + colorize(ansiDim, " move through the command deck"),
+			colorize(ansiGreen, "enter") + colorize(ansiDim, " confirm the selected action"),
+		}
+		if m.selectedChoiceDetails() != nil {
+			lines = append(lines, colorize(ansiBold+ansiCyan, "i")+colorize(ansiDim, " open command detail"))
+		}
+		return lines
+	}
+}
+
+func (m model) rotateLeadCommandLine() string {
+	return colorize(ansiBold+ansiYellow, "r") + colorize(ansiDim, " rotate lead")
+}
+
+func onOffLabel(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+func buildMergeBeats(scene app.Scene) []mergeBeat {
+	if scene.Merge == nil {
+		return nil
+	}
+	merge := scene.Merge
+	return []mergeBeat{
+		{
+			phase:    "FORK SIGNAL DETECTED",
+			progress: 14,
+			line:     fmt.Sprintf("fork archive: %s isolated for destructive graft", merge.ForkName),
+			delay:    180 * time.Millisecond,
+			cue:      audio.EventAlert,
+		},
+		{
+			phase:    "TRAIT LATTICE DESTABILIZING",
+			progress: 37,
+			line:     fmt.Sprintf("base anchor: %s trait shell held under paradox load", merge.ResultName),
+			delay:    220 * time.Millisecond,
+			cue:      audio.EventHackStart,
+		},
+		{
+			phase:    "ABILITY GRAFT IN PROGRESS",
+			progress: 68,
+			line:     fmt.Sprintf("slot 3 splice: %s injected through hostile rewrite channel", merge.Ability),
+			delay:    240 * time.Millisecond,
+			cue:      audio.EventGlitchStinger,
+		},
+		{
+			phase:    "IDENTITY SEAL REWRITING",
+			progress: 89,
+			line:     fmt.Sprintf("warning: %s %s drift registered", merge.FocusStat, fmt.Sprintf("%d -> %d", merge.StatBefore, merge.StatAfter)),
+			delay:    260 * time.Millisecond,
+			cue:      audio.EventCorruptionBurst,
+		},
+		{
+			phase:    "MERGE COMMIT ACCEPTED",
+			progress: 100,
+			line:     fmt.Sprintf("commit: %s stabilized with +%d Health restored", merge.ResultName, merge.Healed),
+			delay:    0,
+			cue:      audio.EventUnlock,
+			final:    true,
+		},
+	}
+}
+
+func (m model) globalCommandLines() []string {
+	lines := []string{
+		colorize(ansiBold+ansiCyan, "c") + colorize(ansiDim, " toggle this command sheet"),
+		colorize(ansiBold+ansiCyan, "m") + colorize(ansiDim, " toggle audio ("+m.audioStatus()+")"),
+	}
+	if m.activeModal != nil {
+		lines = append(lines,
+			colorize(ansiBold+ansiRed, "q")+colorize(ansiDim, " close the current modal"),
+			colorize(ansiBold+ansiCyan, "esc")+colorize(ansiDim, " close the current modal"),
+		)
+		return lines
+	}
+	lines = append(lines, colorize(ansiBold+ansiRed, "q")+colorize(ansiDim, " quit"))
+	return lines
 }
 
 const (
@@ -1923,13 +2689,16 @@ func actorFromCombatView(combat *app.CombatView) string {
 
 func buildPreludeBeats(events []app.Event) []playbackBeat {
 	beats := make([]playbackBeat, 0, len(events))
-	for _, event := range events {
+	for i, event := range events {
 		beats = append(beats, playbackBeat{
-			lines:      []string{event.Message},
-			delay:      playbackIntroDelay,
-			phase:      "LINK ESTABLISHED",
-			phaseStyle: ansiBold + ansiCyan,
-			cue:        event.Cue,
+			line:        event.Message,
+			startDelay:  playbackIntroDelay,
+			holdDelay:   playbackIntroDelay,
+			phase:       "LINK ESTABLISHED",
+			phaseStyle:  ansiBold + ansiCyan,
+			cue:         event.Cue,
+			sequenceEnd: i == len(events)-1,
+			class:       classifyCombatLogLine(event.Message),
 		})
 	}
 	return beats
@@ -1941,12 +2710,14 @@ func buildActionBeats(actor string, scene app.Scene, events []app.Event) []playb
 	}
 
 	beats := []playbackBeat{{
-		lines:      []string{turnBanner(actor, scene)},
-		delay:      playbackTurnDelay,
+		line:       turnBanner(actor, scene),
+		startDelay: playbackTurnDelay,
+		holdDelay:  playbackTurnDelay,
 		actor:      actor,
 		phase:      playbackTurnPhase(actor),
 		phaseStyle: playbackActorStyle(actor),
 		cue:        turnBannerCue(actor),
+		class:      combatLogTurn,
 	}}
 	if len(events) == 0 {
 		return beats
@@ -1955,59 +2726,77 @@ func buildActionBeats(actor string, scene app.Scene, events []app.Event) []playb
 
 	if len(lines) == 1 {
 		beats = append(beats, playbackBeat{
-			lines:      append([]string(nil), lines...),
-			delay:      playbackImpactDelay,
-			actor:      actor,
-			impact:     true,
-			applyScene: true,
-			phase:      "PAYLOAD LANDED",
-			phaseStyle: ansiBold + ansiYellow,
-			cue:        dominantEventCue(events),
+			line:        lines[0],
+			startDelay:  playbackImpactDelay,
+			holdDelay:   playbackSequenceDelay,
+			actor:       actor,
+			impact:      true,
+			applyScene:  true,
+			phase:       "PAYLOAD LANDED",
+			phaseStyle:  ansiBold + ansiYellow,
+			cue:         dominantEventCue(events),
+			sequenceEnd: true,
+			class:       classifyCombatLogLine(lines[0]),
 		})
 		return beats
 	}
 
 	beats = append(beats, playbackBeat{
-		lines:      []string{lines[0]},
-		delay:      playbackActionDelay,
+		line:       lines[0],
+		startDelay: playbackActionDelay,
+		holdDelay:  playbackActionDelay,
 		actor:      actor,
 		phase:      "ABILITY PRIMED",
 		phaseStyle: playbackActorStyle(actor),
 		cue:        actionAnnounceCue(actor),
+		class:      classifyCombatLogLine(lines[0]),
 	})
 
 	index := 1
 	if index < len(lines) && isRollLine(lines[index]) {
 		beats = append(beats, playbackBeat{
-			lines:      []string{lines[index]},
-			delay:      playbackRollDelay,
+			line:       lines[index],
+			startDelay: playbackRollDelay,
+			holdDelay:  playbackRollDelay,
 			actor:      actor,
 			phase:      "RESOLUTION CHECK",
 			phaseStyle: ansiBold + ansiYellow,
+			class:      combatLogRoll,
 		})
 		index++
 	}
 
 	if index < len(lines) {
-		beats = append(beats, playbackBeat{
-			lines:      append([]string(nil), lines[index:]...),
-			delay:      playbackImpactDelay,
-			actor:      actor,
-			impact:     true,
-			applyScene: true,
-			phase:      "PAYLOAD LANDED",
-			phaseStyle: ansiBold + ansiYellow,
-			cue:        dominantEventCue(events[index:]),
-		})
+		impactApplied := false
+		for i := index; i < len(lines); i++ {
+			beats = append(beats, playbackBeat{
+				line:        lines[i],
+				startDelay:  playbackImpactDelay,
+				holdDelay:   playbackImpactDelay,
+				actor:       actor,
+				impact:      true,
+				applyScene:  !impactApplied,
+				phase:       "PAYLOAD LANDED",
+				phaseStyle:  ansiBold + ansiYellow,
+				cue:         events[i].Cue,
+				sequenceEnd: i == len(lines)-1,
+				class:       classifyCombatLogLine(lines[i]),
+			})
+			impactApplied = true
+		}
+		last := len(beats) - 1
+		beats[last].holdDelay = playbackSequenceDelay
 		return beats
 	}
 
 	last := len(beats) - 1
 	beats[last].impact = true
 	beats[last].applyScene = true
-	beats[last].delay = playbackImpactDelay
+	beats[last].startDelay = playbackImpactDelay
+	beats[last].holdDelay = playbackSequenceDelay
 	beats[last].phase = "PAYLOAD LANDED"
 	beats[last].phaseStyle = ansiBold + ansiYellow
+	beats[last].sequenceEnd = true
 	return beats
 }
 
@@ -2069,31 +2858,134 @@ func retainsCombatLog(scene app.Scene) bool {
 	return scene.Combat != nil || scene.Kind == "inspect"
 }
 
+func currentPlaybackBeat(playback *playbackSequence) *playbackBeat {
+	if playback == nil || playback.index == 0 || playback.index-1 >= len(playback.beats) {
+		return nil
+	}
+	return &playback.beats[playback.index-1]
+}
+
+func currentPlaybackFullLine(playback *playbackSequence) string {
+	current := currentPlaybackBeat(playback)
+	if current == nil {
+		return ""
+	}
+	return current.line
+}
+
+func playbackVisibleLine(line string, visibleRunes int) string {
+	if visibleRunes <= 0 {
+		return ""
+	}
+	runes := []rune(line)
+	if visibleRunes >= len(runes) {
+		return line
+	}
+	return string(runes[:visibleRunes])
+}
+
+func isTypingSilentRune(r rune) bool {
+	return r == ' ' || r == '\t'
+}
+
+func playbackRuneDelay(r rune) time.Duration {
+	delay := playbackTypingDelay
+	switch r {
+	case ',':
+		delay += 35 * time.Millisecond
+	case ':':
+		delay += 45 * time.Millisecond
+	case '%':
+		delay += 30 * time.Millisecond
+	case '.':
+		delay += 70 * time.Millisecond
+	}
+	return delay
+}
+
+func (m model) playbackDelay(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return delay
+	}
+	if m.playback == nil || !m.playback.fast {
+		return delay
+	}
+	scaled := time.Duration(float64(delay) * playbackFastScale)
+	if scaled < playbackFastMinDelay {
+		return playbackFastMinDelay
+	}
+	return scaled
+}
+
+func (m model) playbackTypingStep() int {
+	if m.playback != nil && m.playback.fast {
+		return playbackFastTypingStep
+	}
+	return 1
+}
+
+func (m model) playbackPulseGap() time.Duration {
+	if m.playback != nil && m.playback.fast {
+		return playbackFastPulseGap
+	}
+	return playbackTypingPulseGap
+}
+
 func remainingPlaybackLines(playback *playbackSequence) []string {
 	if playback == nil {
 		return nil
 	}
 	lines := []string{}
-	for i := playback.index; i < len(playback.beats); i++ {
-		lines = append(lines, playback.beats[i].lines...)
+	for _, beat := range remainingSequenceBeats(playback) {
+		lines = append(lines, beat.line)
+		if beat.sequenceEnd {
+			lines = append(lines, "")
+			break
+		}
 	}
 	return lines
 }
 
-func remainingPlaybackBeats(playback *playbackSequence) []playbackBeat {
-	if playback == nil || playback.index >= len(playback.beats) {
+func remainingSequenceBeats(playback *playbackSequence) []playbackBeat {
+	if playback == nil {
 		return nil
 	}
-	return append([]playbackBeat(nil), playback.beats[playback.index:]...)
+	start := playback.index
+	if current := currentPlaybackBeat(playback); current != nil {
+		start--
+	}
+	if start < 0 {
+		start = 0
+	}
+	beats := make([]playbackBeat, 0, len(playback.beats)-start)
+	for i := start; i < len(playback.beats); i++ {
+		beats = append(beats, playback.beats[i])
+		if playback.beats[i].sequenceEnd {
+			break
+		}
+	}
+	return beats
 }
 
-func dominantPlaybackCue(beats []playbackBeat) audio.Event {
+func remainingSequenceCues(playback *playbackSequence, currentStarted bool) []audio.Event {
+	beats := remainingSequenceBeats(playback)
+	cues := make([]audio.Event, 0, len(beats))
+	for i, beat := range beats {
+		if i == 0 && currentStarted {
+			continue
+		}
+		cues = append(cues, beat.cue)
+	}
+	return cues
+}
+
+func dominantPlaybackCue(cues []audio.Event) audio.Event {
 	best := audio.Event("")
 	bestPriority := 0
-	for _, beat := range beats {
-		priority := cuePriority(beat.cue)
+	for _, cue := range cues {
+		priority := cuePriority(cue)
 		if priority > bestPriority {
-			best = beat.cue
+			best = cue
 			bestPriority = priority
 		}
 	}

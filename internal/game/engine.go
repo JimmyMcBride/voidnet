@@ -22,6 +22,8 @@ const (
 	PhaseReward        Phase = "reward"
 	PhaseMaintenance   Phase = "maintenance"
 	PhaseSelectActive  Phase = "select_active"
+	PhaseMergeConfirm  Phase = "merge_confirm"
+	PhaseMergeResult   Phase = "merge_result"
 	PhaseGameOver      Phase = "game_over"
 )
 
@@ -48,6 +50,8 @@ const (
 	SelectActiveRepair     ActiveSelectionContext = "repair_target"
 	SelectActiveFortify    ActiveSelectionContext = "fortify_target"
 	SelectActiveRotateLead ActiveSelectionContext = "rotate_lead"
+	SelectActiveMergeBase  ActiveSelectionContext = "merge_base"
+	SelectActiveMergeFork  ActiveSelectionContext = "merge_fork"
 )
 
 type Stats struct {
@@ -70,6 +74,7 @@ type Ability struct {
 type Daemon struct {
 	ID           string
 	Name         string
+	MergeLevel   int
 	ArchetypeID  string
 	MaxIntegrity int
 	Integrity    int
@@ -101,6 +106,19 @@ type CombatState struct {
 	CanCapture bool
 }
 
+type MergeResult struct {
+	ForkName     string
+	ResultName   string
+	TraitID      string
+	FocusStat    string
+	StatBefore   int
+	StatAfter    int
+	Healed       int
+	Ability      Ability
+	RosterIndex  int
+	BaseSeedName string
+}
+
 type RunState struct {
 	Seed               int64
 	Phase              Phase
@@ -110,6 +128,7 @@ type RunState struct {
 	Roster             []Daemon
 	ActiveIndex        int
 	Combat             *CombatState
+	PendingMergeResult *MergeResult
 	PendingCapture     *Daemon
 	PendingRewardTitle string
 	PendingRewardLines []string
@@ -117,6 +136,8 @@ type RunState struct {
 	Inspecting         bool
 	FirstCombatBoosted bool
 	SelectActiveMode   ActiveSelectionContext
+	PendingMergeBase   int
+	PendingMergeFork   int
 	MaintenanceCharge  int
 	Won                bool
 	Lost               bool
@@ -149,11 +170,13 @@ func (e *Engine) Reset(seed int64) {
 	e.rng = rand.New(rand.NewSource(seed))
 	e.nextDaemonID = 1
 	e.Run = &RunState{
-		Seed:           seed,
-		Phase:          PhaseStarterSelect,
-		PositionNodeID: "start",
-		Nodes:          make(map[string]*Node),
-		ActiveIndex:    -1,
+		Seed:             seed,
+		Phase:            PhaseStarterSelect,
+		PositionNodeID:   "start",
+		Nodes:            make(map[string]*Node),
+		ActiveIndex:      -1,
+		PendingMergeBase: -1,
+		PendingMergeFork: -1,
 	}
 	e.buildGraph()
 }
@@ -177,8 +200,8 @@ func (e *Engine) ChooseStarter(archetypeID string) ([]string, error) {
 	e.revealChildren("start")
 
 	lines := []string{
-		fmt.Sprintf("Boot sequence locked on %s.", starter.Name),
-		fmt.Sprintf("%s enters the network with %d Integrity.", starter.Name, starter.Integrity),
+		fmt.Sprintf("Boot sequence locked on %s.", daemonDisplayName(&starter)),
+		fmt.Sprintf("%s enters the network with %d Health.", daemonDisplayName(&starter), starter.Integrity),
 	}
 
 	lines = append(lines, e.applyUnlockTrigger("use_archetype:"+archetypeID)...)
@@ -226,11 +249,11 @@ func (e *Engine) ChooseNode(nodeID string) ([]string, error) {
 
 	lines := append(prelude,
 		fmt.Sprintf("Entered %s.", node.Label),
-		fmt.Sprintf("Encountered %s.", enemy.Name),
+		fmt.Sprintf("Encountered %s.", daemonDisplayName(&enemy)),
 	)
 	if starterBoosted {
 		if active := e.activeDaemon(); active != nil {
-			lines = append(lines, fmt.Sprintf("%s gained Stabilized.", active.Name))
+			lines = append(lines, fmt.Sprintf("%s gained Stabilized.", daemonDisplayName(active)))
 		}
 	}
 	e.setCombatLog(lines)
@@ -307,7 +330,7 @@ func (e *Engine) AttemptCapture() ([]string, error) {
 	chance, eligible, terms := e.captureChanceDetails()
 	lines := []string{}
 	if !eligible {
-		lines = append(lines, "Isolation failed. Target Integrity is above 50%.")
+		lines = append(lines, "Isolation failed. Target Health is above 50%.")
 	} else {
 		roll := e.rng.Intn(100) + 1
 		lines = append(lines, formatChanceBreakdown("Isolation chance", chance, roll, terms))
@@ -338,14 +361,14 @@ func (e *Engine) ChooseReplacement(index int) ([]string, error) {
 	lines := []string{}
 	switch {
 	case index == -1:
-		lines = append(lines, fmt.Sprintf("Discarded %s and kept the current roster.", e.Run.PendingCapture.Name))
+		lines = append(lines, fmt.Sprintf("Discarded %s and kept the current roster.", daemonDisplayName(e.Run.PendingCapture)))
 	case index >= 0 && index < len(e.Run.Roster):
 		old := e.Run.Roster[index]
 		e.Run.Roster[index] = *e.Run.PendingCapture
 		if e.Run.ActiveIndex == index {
 			e.Run.ActiveIndex = index
 		}
-		lines = append(lines, fmt.Sprintf("Replaced %s with %s.", old.Name, e.Run.PendingCapture.Name))
+		lines = append(lines, fmt.Sprintf("Replaced %s with %s.", daemonDisplayName(&old), daemonDisplayName(e.Run.PendingCapture)))
 	default:
 		return nil, fmt.Errorf("replacement index %d out of range", index)
 	}
@@ -367,6 +390,10 @@ func (e *Engine) Continue() ([]string, error) {
 		} else {
 			e.Run.Phase = PhaseMaintenance
 		}
+		return nil, nil
+	case PhaseMergeResult:
+		e.Run.PendingMergeResult = nil
+		e.Run.Phase = PhaseNodeSelect
 		return nil, nil
 	case PhaseGameOver:
 		var nextSeed int64
@@ -398,6 +425,20 @@ func (e *Engine) OpenNodeMap() ([]string, error) {
 	return nil, nil
 }
 
+func (e *Engine) BeginMerge() ([]string, error) {
+	if e.Run.Phase != PhaseNodeSelect {
+		return nil, fmt.Errorf("merge is unavailable in phase %s", e.Run.Phase)
+	}
+	if !e.hasEligibleMergePair() {
+		return nil, fmt.Errorf("no eligible merge pair is available")
+	}
+	e.Run.SelectActiveMode = SelectActiveMergeBase
+	e.Run.PendingMergeBase = -1
+	e.Run.PendingMergeFork = -1
+	e.Run.Phase = PhaseSelectActive
+	return []string{"Choose the base daemon that will absorb a fork."}, nil
+}
+
 func (e *Engine) BeginRotateLead() ([]string, error) {
 	if e.Run.Phase != PhaseNodeSelect {
 		return nil, fmt.Errorf("rotate lead is unavailable in phase %s", e.Run.Phase)
@@ -416,6 +457,35 @@ func (e *Engine) CancelRotateLead() ([]string, error) {
 	}
 	e.Run.SelectActiveMode = SelectActiveNone
 	e.Run.Phase = PhaseNodeSelect
+	return nil, nil
+}
+
+func (e *Engine) CancelMergeSelection() ([]string, error) {
+	if e.Run.Phase != PhaseSelectActive {
+		return nil, fmt.Errorf("merge cancel is unavailable in phase %s", e.Run.Phase)
+	}
+	switch e.Run.SelectActiveMode {
+	case SelectActiveMergeBase:
+		e.clearPendingMerge()
+		e.Run.SelectActiveMode = SelectActiveNone
+		e.Run.Phase = PhaseNodeSelect
+		return nil, nil
+	case SelectActiveMergeFork:
+		e.Run.PendingMergeFork = -1
+		e.Run.SelectActiveMode = SelectActiveMergeBase
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("merge cancel is unavailable in mode %s", e.Run.SelectActiveMode)
+	}
+}
+
+func (e *Engine) CancelMergeConfirm() ([]string, error) {
+	if e.Run.Phase != PhaseMergeConfirm || e.Run.PendingMergeBase < 0 {
+		return nil, fmt.Errorf("merge confirm cancel is unavailable in phase %s", e.Run.Phase)
+	}
+	e.Run.PendingMergeFork = -1
+	e.Run.SelectActiveMode = SelectActiveMergeFork
+	e.Run.Phase = PhaseSelectActive
 	return nil, nil
 }
 
@@ -448,7 +518,7 @@ func (e *Engine) ChooseActive(index int) ([]string, error) {
 	switch e.Run.SelectActiveMode {
 	case SelectActiveAfterLoss:
 		e.Run.ActiveIndex = index
-		lines = append(lines, fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name))
+		lines = append(lines, fmt.Sprintf("%s is now active.", daemonDisplayName(&e.Run.Roster[index])))
 		e.Run.SelectActiveMode = SelectActiveNone
 		e.Run.Phase = PhaseMaintenance
 	case SelectActiveRepair:
@@ -456,10 +526,10 @@ func (e *Engine) ChooseActive(index int) ([]string, error) {
 			return nil, fmt.Errorf("no maintenance charge is available")
 		}
 		if restored := e.restoreIntegrityPercent(target, 0.30, 10); restored > 0 {
-			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", target.Name, restored))
+			lines = append(lines, fmt.Sprintf("%s restored %d Health during maintenance.", daemonDisplayName(target), restored))
 		}
 		if removed := e.cleanseOneNegative(target); removed != "" {
-			lines = append(lines, fmt.Sprintf("%s cleared %s.", target.Name, e.Content.Statuses[removed].Name))
+			lines = append(lines, fmt.Sprintf("%s cleared %s.", daemonDisplayName(target), e.Content.Statuses[removed].Name))
 		}
 		e.Run.MaintenanceCharge = 0
 		e.Run.SelectActiveMode = SelectActiveNone
@@ -469,26 +539,91 @@ func (e *Engine) ChooseActive(index int) ([]string, error) {
 			return nil, fmt.Errorf("no maintenance charge is available")
 		}
 		if restored := e.restoreIntegrityPercent(target, 0.10, 4); restored > 0 {
-			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", target.Name, restored))
+			lines = append(lines, fmt.Sprintf("%s restored %d Health during maintenance.", daemonDisplayName(target), restored))
 		}
 		e.applyStatus(target, "stabilized", 2)
-		lines = append(lines, fmt.Sprintf("%s gained Stabilized.", target.Name))
+		lines = append(lines, fmt.Sprintf("%s gained Stabilized.", daemonDisplayName(target)))
 		e.Run.MaintenanceCharge = 0
 		e.Run.SelectActiveMode = SelectActiveNone
 		e.Run.Phase = PhaseMaintenance
 	case SelectActiveRotateLead:
 		e.Run.ActiveIndex = index
-		lines = append(lines, fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name))
+		lines = append(lines, fmt.Sprintf("%s is now active.", daemonDisplayName(&e.Run.Roster[index])))
 		active := e.activeDaemon()
 		if restored := e.restoreIntegrityPercent(active, 0.20, 6); restored > 0 {
-			lines = append(lines, fmt.Sprintf("%s restored %d Integrity during maintenance.", active.Name, restored))
+			lines = append(lines, fmt.Sprintf("%s restored %d Health during maintenance.", daemonDisplayName(active), restored))
 		}
 		e.Run.SelectActiveMode = SelectActiveNone
 		e.Run.Phase = PhaseNodeSelect
+	case SelectActiveMergeBase:
+		if !e.canMergeAsBase(index) {
+			return nil, fmt.Errorf("choose a daemon that can serve as the base daemon")
+		}
+		e.Run.PendingMergeBase = index
+		e.Run.PendingMergeFork = -1
+		e.Run.SelectActiveMode = SelectActiveMergeFork
+	case SelectActiveMergeFork:
+		if !e.canMergePair(e.Run.PendingMergeBase, index) {
+			return nil, fmt.Errorf("choose a different unmerged daemon with another archetype")
+		}
+		e.Run.PendingMergeFork = index
+		e.Run.SelectActiveMode = SelectActiveNone
+		e.Run.Phase = PhaseMergeConfirm
 	default:
 		e.Run.ActiveIndex = index
-		lines = append(lines, fmt.Sprintf("%s is now active.", e.Run.Roster[index].Name))
+		lines = append(lines, fmt.Sprintf("%s is now active.", daemonDisplayName(&e.Run.Roster[index])))
 		e.Run.Phase = PhaseNodeSelect
+	}
+	return lines, nil
+}
+
+func (e *Engine) ConfirmMerge() ([]string, error) {
+	if e.Run.Phase != PhaseMergeConfirm {
+		return nil, fmt.Errorf("merge confirmation is not active")
+	}
+	baseIndex := e.Run.PendingMergeBase
+	forkIndex := e.Run.PendingMergeFork
+	if !e.canMergePair(baseIndex, forkIndex) {
+		return nil, fmt.Errorf("pending merge pair is no longer valid")
+	}
+
+	base := &e.Run.Roster[baseIndex]
+	fork := e.Run.Roster[forkIndex]
+	forkSpecial := forkSpecialAbility(fork)
+	modifierID := e.rollMergeModifier(fork)
+	mergedAbility := Ability{EffectID: forkSpecial.EffectID, ModifierID: modifierID}
+	statName, before, after := e.applyMergeStatBonus(base, fork.ArchetypeID)
+	base.Abilities = append(base.Abilities, mergedAbility)
+	base.MergeLevel = 1
+	healed := e.restoreIntegrityPercent(base, 0.25, 8)
+	newName := daemonDisplayName(base)
+	forkName := daemonDisplayName(&fork)
+	activeIndex := e.resolveActiveIndexAfterMerge(baseIndex, forkIndex)
+
+	e.Run.Roster = slices.Delete(e.Run.Roster, forkIndex, forkIndex+1)
+	e.Run.ActiveIndex = activeIndex
+	e.Run.PendingMergeResult = &MergeResult{
+		ForkName:     forkName,
+		ResultName:   newName,
+		TraitID:      base.TraitID,
+		FocusStat:    statName,
+		StatBefore:   before,
+		StatAfter:    after,
+		Healed:       healed,
+		Ability:      mergedAbility,
+		RosterIndex:  activeIndexForMergedResult(baseIndex, forkIndex),
+		BaseSeedName: base.Name,
+	}
+	e.clearPendingMerge()
+	e.Run.SelectActiveMode = SelectActiveNone
+	e.Run.Phase = PhaseMergeResult
+
+	lines := []string{
+		fmt.Sprintf("%s was absorbed into %s.", forkName, newName),
+		fmt.Sprintf("%s advanced to %s.", base.Name, newName),
+		fmt.Sprintf("%s %s increased from %d to %d.", newName, statName, before, after),
+		fmt.Sprintf("%s restored %d Health through merge stabilization.", newName, healed),
+		fmt.Sprintf("%s gained %s.", newName, abilityDisplayLabel(mergedAbility, e.Content)),
 	}
 	return lines, nil
 }
@@ -532,6 +667,22 @@ func (e *Engine) ActiveDaemon() *Daemon {
 
 func (e *Engine) NodeChoices() []string {
 	return e.currentChoicesForNodes()
+}
+
+func (e *Engine) CanBeginMerge() bool {
+	return e.hasEligibleMergePair()
+}
+
+func (e *Engine) CanMergeAsBase(index int) bool {
+	return e.canMergeAsBase(index)
+}
+
+func (e *Engine) CanMergeAsFork(index int) bool {
+	return e.canMergePair(e.Run.PendingMergeBase, index)
+}
+
+func DaemonDisplayName(d *Daemon) string {
+	return daemonDisplayName(d)
 }
 
 func (e *Engine) captureChance() (int, bool) {
@@ -820,6 +971,148 @@ func (e *Engine) fixedAbilityEffects(archetypeID string) []string {
 	}
 }
 
+func forkSpecialAbility(daemon Daemon) Ability {
+	if len(daemon.Abilities) < 2 {
+		return Ability{}
+	}
+	return daemon.Abilities[1]
+}
+
+func daemonDisplayName(d *Daemon) string {
+	if d == nil {
+		return ""
+	}
+	if d.MergeLevel <= 0 {
+		return d.Name
+	}
+	return fmt.Sprintf("%s +%d", d.Name, d.MergeLevel)
+}
+
+func abilityDisplayLabel(ability Ability, reg *content.Registry) string {
+	effect := reg.Effects[ability.EffectID]
+	modifier := reg.Modifiers[ability.ModifierID]
+	return fmt.Sprintf("%s + %s", effect.Name, modifier.Name)
+}
+
+func (e *Engine) hasEligibleMergePair() bool {
+	for i := range e.Run.Roster {
+		if e.canMergeAsBase(i) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) canMergeAsBase(index int) bool {
+	if index < 0 || index >= len(e.Run.Roster) {
+		return false
+	}
+	base := e.Run.Roster[index]
+	if base.MergeLevel > 0 {
+		return false
+	}
+	for forkIndex := range e.Run.Roster {
+		if e.canMergePair(index, forkIndex) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) canMergePair(baseIndex, forkIndex int) bool {
+	if baseIndex < 0 || forkIndex < 0 || baseIndex >= len(e.Run.Roster) || forkIndex >= len(e.Run.Roster) {
+		return false
+	}
+	if baseIndex == forkIndex {
+		return false
+	}
+	base := e.Run.Roster[baseIndex]
+	fork := e.Run.Roster[forkIndex]
+	if base.MergeLevel > 0 || fork.MergeLevel > 0 {
+		return false
+	}
+	return base.ArchetypeID != fork.ArchetypeID
+}
+
+func (e *Engine) clearPendingMerge() {
+	e.Run.PendingMergeBase = -1
+	e.Run.PendingMergeFork = -1
+}
+
+func (e *Engine) mergeModifierCandidates(fork Daemon) []string {
+	weightByID := map[string]int{}
+	for _, id := range e.Meta.UnlockedModifiers {
+		weightByID[id] = max(1, weightByID[id])
+	}
+	for _, ability := range fork.Abilities {
+		weightByID[ability.ModifierID] = max(1, weightByID[ability.ModifierID]) + 4
+	}
+
+	candidates := make([]string, 0, len(weightByID))
+	for id, weight := range weightByID {
+		if _, ok := e.Content.Modifiers[id]; !ok || weight <= 0 {
+			continue
+		}
+		for range weight {
+			candidates = append(candidates, id)
+		}
+	}
+	if len(candidates) == 0 {
+		return []string{"single"}
+	}
+	slices.Sort(candidates)
+	return candidates
+}
+
+func (e *Engine) rollMergeModifier(fork Daemon) string {
+	candidates := e.mergeModifierCandidates(fork)
+	return candidates[e.rng.Intn(len(candidates))]
+}
+
+func (e *Engine) applyMergeStatBonus(base *Daemon, forkArchetypeID string) (string, int, int) {
+	focus := e.Content.Archetypes[forkArchetypeID].MergeFocusStat
+	switch focus {
+	case "integrity":
+		before := base.MaxIntegrity
+		base.MaxIntegrity += 2
+		base.Integrity += 2
+		return "Max Health", before, base.MaxIntegrity
+	case "stability":
+		before := base.Stability
+		base.Stability += 2
+		return "Stability", before, base.Stability
+	case "speed":
+		before := base.Speed
+		base.Speed += 2
+		return "Speed", before, base.Speed
+	default:
+		return "Stat", 0, 0
+	}
+}
+
+func (e *Engine) resolveActiveIndexAfterMerge(baseIndex, forkIndex int) int {
+	postDeleteBaseIndex := baseIndex
+	if forkIndex < baseIndex {
+		postDeleteBaseIndex--
+	}
+	switch e.Run.ActiveIndex {
+	case baseIndex, forkIndex:
+		return postDeleteBaseIndex
+	default:
+		if e.Run.ActiveIndex > forkIndex {
+			return e.Run.ActiveIndex - 1
+		}
+		return e.Run.ActiveIndex
+	}
+}
+
+func activeIndexForMergedResult(baseIndex, forkIndex int) int {
+	if forkIndex < baseIndex {
+		return baseIndex - 1
+	}
+	return baseIndex
+}
+
 func (e *Engine) resolveAbility(actor Actor, ability Ability) []string {
 	var source, target *Daemon
 	if actor == ActorPlayer {
@@ -902,7 +1195,7 @@ func (e *Engine) resolveAbility(actor Actor, ability Ability) []string {
 		case "heal":
 			heal := max(1, power)
 			target.Integrity = min(target.MaxIntegrity, target.Integrity+heal)
-			lines = append(lines, fmt.Sprintf("%s restored %d Integrity.", targetName, heal))
+			lines = append(lines, fmt.Sprintf("%s restored %d Health.", targetName, heal))
 			if effect.CleanseNegative {
 				if removed := e.cleanseOneNegative(target); removed != "" {
 					lines = append(lines, fmt.Sprintf("%s cleared %s.", targetName, e.Content.Statuses[removed].Name))
@@ -1060,24 +1353,24 @@ func (e *Engine) finishCombatWin(captured bool, capturedDaemon *Daemon, lines []
 	active := e.activeDaemon()
 	if active != nil {
 		e.applyGrowth(active)
-		lines = append(lines, fmt.Sprintf("%s gained +%d Integrity, +%d Speed, +%d Stability.", active.Name,
+		lines = append(lines, fmt.Sprintf("%s gained +%d Max Health, +%d Speed, +%d Stability.", daemonDisplayName(active),
 			e.Content.Archetypes[active.ArchetypeID].Growth.Integrity,
 			e.Content.Archetypes[active.ArchetypeID].Growth.Speed,
 			e.Content.Archetypes[active.ArchetypeID].Growth.Stability,
 		))
 		if restored := e.restoreVictoryIntegrity(active); restored > 0 {
-			lines = append(lines, fmt.Sprintf("%s restored %d Integrity after the encounter.", active.Name, restored))
+			lines = append(lines, fmt.Sprintf("%s restored %d Health after the encounter.", daemonDisplayName(active), restored))
 		}
 	}
 
 	if captured && capturedDaemon != nil {
 		if len(e.Run.Roster) >= 3 {
 			e.Run.PendingCapture = capturedDaemon
-			lines = append(lines, fmt.Sprintf("%s is ready to join the roster, but capacity is full.", capturedDaemon.Name))
+			lines = append(lines, fmt.Sprintf("%s is ready to join the roster, but capacity is full.", daemonDisplayName(capturedDaemon)))
 			e.Run.Phase = PhaseReplace
 		} else {
 			e.Run.Roster = append(e.Run.Roster, *capturedDaemon)
-			lines = append(lines, fmt.Sprintf("%s joined the roster.", capturedDaemon.Name))
+			lines = append(lines, fmt.Sprintf("%s joined the roster.", daemonDisplayName(capturedDaemon)))
 			e.Run.Phase = PhaseReward
 		}
 		lines = append(lines, e.applyUnlockTrigger("first_capture")...)
@@ -1430,9 +1723,9 @@ func (e *Engine) combatantLabel(actor Actor, daemon *Daemon) string {
 		return "Enemy Daemon"
 	}
 	if actor == ActorPlayer {
-		return "Your " + daemon.Name
+		return "Your " + daemonDisplayName(daemon)
 	}
-	return "Enemy " + daemon.Name
+	return "Enemy " + daemonDisplayName(daemon)
 }
 
 func oppositeActor(actor Actor) Actor {

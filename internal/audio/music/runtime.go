@@ -25,6 +25,7 @@ type Runtime struct {
 	cache     *Cache
 	player    player
 	active    LoopID
+	reactive  ReactiveState
 }
 
 func NewRuntime(opts Options) (*Runtime, error) {
@@ -55,7 +56,7 @@ func (r *Runtime) StartLoop(loop LoopID) error {
 		r.active = loop
 		return nil
 	}
-	pcm, err := r.cache.Get(loop)
+	pcm, err := r.cache.GetVariant(loop, r.reactive)
 	if err != nil {
 		return err
 	}
@@ -77,6 +78,26 @@ func (r *Runtime) StopLoop() {
 	_ = r.player.Stop()
 }
 
+func (r *Runtime) SetReactiveState(state ReactiveState) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	state = state.normalized()
+	if r.reactive == state {
+		return nil
+	}
+	r.reactive = state
+	if !r.available || r.muted || r.player == nil || r.active == "" {
+		return nil
+	}
+	pcm, err := r.cache.GetVariant(r.active, r.reactive)
+	if err != nil {
+		return err
+	}
+	_ = r.player.Stop()
+	return r.player.StartLoopPCM(pcm)
+}
+
 func (r *Runtime) SetMuted(muted bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -96,7 +117,7 @@ func (r *Runtime) SetMuted(muted bool) {
 		r.muted = false
 		return
 	}
-	pcm, err := r.cache.Get(r.active)
+	pcm, err := r.cache.GetVariant(r.active, r.reactive)
 	if err != nil {
 		return
 	}
@@ -123,8 +144,4 @@ func (r *Runtime) Close() error {
 	err := r.player.Close()
 	r.player = nil
 	return err
-}
-
-func defaultPlayerFactory() (player, error) {
-	return nil, errAudioUnavailable
 }
