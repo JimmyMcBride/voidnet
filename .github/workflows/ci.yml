@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - trunk
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install Linux audio build dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Smoke build release targets
+        env:
+          VERSION: ci-${{ github.sha }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p dist/linux dist/darwin-amd64 dist/darwin-arm64 dist/windows
+          LDFLAGS="-s -w -X voidnet/internal/buildinfo.version=${VERSION} -X voidnet/internal/buildinfo.commit=${COMMIT} -X voidnet/internal/buildinfo.date=${BUILD_DATE}"
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux/voidnet ./cmd/voidnet
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-amd64/voidnet ./cmd/voidnet
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-arm64/voidnet ./cmd/voidnet
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/windows/voidnet.exe ./cmd/voidnet

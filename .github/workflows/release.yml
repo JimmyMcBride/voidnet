@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev zip
+
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X voidnet/internal/buildinfo.version=${VERSION} -X voidnet/internal/buildinfo.commit=${COMMIT} -X voidnet/internal/buildinfo.date=${BUILD_DATE}"
+          mkdir -p dist/linux-amd64 dist/darwin-amd64 dist/darwin-arm64 dist/windows-amd64
+
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-amd64/voidnet ./cmd/voidnet
+          tar -C dist/linux-amd64 -czf dist/voidnet-linux-amd64.tar.gz voidnet
+
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-amd64/voidnet ./cmd/voidnet
+          tar -C dist/darwin-amd64 -czf dist/voidnet-darwin-amd64.tar.gz voidnet
+
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-arm64/voidnet ./cmd/voidnet
+          tar -C dist/darwin-arm64 -czf dist/voidnet-darwin-arm64.tar.gz voidnet
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/windows-amd64/voidnet.exe ./cmd/voidnet
+          (
+            cd dist/windows-amd64
+            zip -q ../voidnet-windows-amd64.zip voidnet.exe
+          )
+
+          (
+            cd dist
+            sha256sum \
+              voidnet-linux-amd64.tar.gz \
+              voidnet-darwin-amd64.tar.gz \
+              voidnet-darwin-arm64.tar.gz \
+              voidnet-windows-amd64.zip \
+              > voidnet-checksums.txt
+          )
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/voidnet-linux-amd64.tar.gz
+            dist/voidnet-darwin-amd64.tar.gz
+            dist/voidnet-darwin-arm64.tar.gz
+            dist/voidnet-windows-amd64.zip
+            dist/voidnet-checksums.txt

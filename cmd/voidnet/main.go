@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"voidnet/internal/app"
+	"voidnet/internal/buildinfo"
 	"voidnet/internal/content"
 	"voidnet/internal/meta"
 	"voidnet/internal/ui"
@@ -15,8 +16,14 @@ func main() {
 	var (
 		seedFlag     = flag.Int64("seed", 0, "run seed override")
 		metaPathFlag = flag.String("meta-path", "", "meta progression file path")
+		versionFlag  = flag.Bool("version", false, "print build version and exit")
 	)
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(buildinfo.Current().String())
+		return
+	}
 
 	registry, err := content.Load()
 	if err != nil {
